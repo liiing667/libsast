@@ -2,6 +2,10 @@
 """Helper Functions."""
 import re
 from pathlib import Path
+from urllib.parse import (
+    urljoin,
+    urlparse,
+)
 
 from libsast.exceptions import (
     InvalidRuleError,
@@ -19,16 +23,90 @@ DEF_MULTI = re.compile(r'/\*([\S|\s]+?)\*/', re.MULTILINE)
 XML_CMT = re.compile(r'<!--([\S|\s]+?)-->', re.MULTILINE)
 REPL_REGEX = re.compile(r'\S', re.MULTILINE)
 
+# Remote rule download limits
+RULE_DOWNLOAD_TIMEOUT = 10
+MAX_RULE_SIZE = 5 * 1024 * 1024
+MAX_RULE_REDIRECTS = 5
+_DEFAULT_PORTS = {'http': 80, 'https': 443}
 
-def download_rule(url):
-    """Download Pattern File."""
+
+def _origin(url):
+    """Return the normalized (scheme, host, port) origin of a URL."""
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or '').lower()
+    port = parsed.port or _DEFAULT_PORTS.get(scheme)
+    return (scheme, host, port)
+
+
+def _validate_redirect(trusted_url, target_url):
+    """Validate a redirect target against the trusted rule URL.
+
+    Rejects non-HTTP(S) targets, HTTPS downgrades and cross-origin
+    redirects so a trusted rule URL cannot be bounced to an
+    untrusted host, internal service or local file handler.
+    """
+    target = urlparse(target_url)
+    if target.scheme.lower() not in ('http', 'https'):
+        raise RuleDownloadError(
+            f'Redirect to unsupported scheme blocked: {target_url}')
+    trusted = _origin(trusted_url)
+    if trusted[0] == 'https' and target.scheme.lower() != 'https':
+        raise RuleDownloadError(
+            f'HTTPS downgrade redirect blocked: {target_url}')
+    if _origin(target_url) != trusted:
+        raise RuleDownloadError(
+            f'Cross-origin redirect blocked: {target_url}')
+
+
+def _read_response(response, max_size, url):
+    """Read a response body, failing if it exceeds max_size bytes."""
+    content_length = response.headers.get('Content-Length')
+    if content_length and content_length.isdigit():
+        if int(content_length) > max_size:
+            raise RuleDownloadError(
+                f'Rule file too large ({content_length} bytes): {url}')
+    chunks = []
+    received = 0
+    for chunk in response.iter_content(chunk_size=65536):
+        received += len(chunk)
+        if received > max_size:
+            raise RuleDownloadError(
+                f'Rule file exceeds {max_size} bytes: {url}')
+        chunks.append(chunk)
+    encoding = response.encoding or response.apparent_encoding or 'utf-8'
+    return b''.join(chunks).decode(encoding, errors='replace')
+
+
+def download_rule(url, timeout=RULE_DOWNLOAD_TIMEOUT, max_size=MAX_RULE_SIZE):
+    """Download Pattern File.
+
+    Redirects are followed manually: every hop must stay on the
+    origin of the trusted URL, must not downgrade HTTPS to HTTP and
+    must use HTTP(S). Responses larger than max_size are rejected
+    before they are parsed.
+    """
+    current = url
     try:
-        with requests.get(
-                url,
-                allow_redirects=True,
-                timeout=10) as r:
-            r.raise_for_status()
-            return r.text
+        for _ in range(MAX_RULE_REDIRECTS + 1):
+            with requests.get(
+                    current,
+                    allow_redirects=False,
+                    stream=True,
+                    timeout=timeout) as r:
+                if r.is_redirect or r.is_permanent_redirect:
+                    location = r.headers.get('Location')
+                    if not location:
+                        raise RuleDownloadError(
+                            f'Redirect without Location header: {current}')
+                    target = urljoin(current, location)
+                    _validate_redirect(url, target)
+                    current = target
+                    continue
+                r.raise_for_status()
+                return _read_response(r, max_size, url)
+        raise RuleDownloadError(
+            f'Too many redirects (>{MAX_RULE_REDIRECTS}): {url}')
     except requests.exceptions.RequestException:
         raise RuleDownloadError(f'Failed to download from: {url}')
 
