@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from libsast.exceptions import (
+    DuplicateRuleIdError,
     InvalidRuleError,
     MissingRuleError,
     RuleDownloadError,
@@ -44,23 +45,51 @@ def get_rules(rule_loc):  # noqa: R701
         rules = read_yaml(pat, True)
         if not rules:
             return
-        return get_mapping(rules)
+        return merge_rules([(rule_loc, get_mapping(rules))])
     rule = Path(rule_loc)
     if rule.is_file() and rule.exists():
         rules = read_yaml(rule)
         if not rules:
             return
-        return get_mapping(rules)
+        return merge_rules([(rule.as_posix(), get_mapping(rules))])
     elif rule.is_dir() and rule.exists():
-        patterns = []
-        for yfile in rule.glob('**/*.yaml'):
+        rule_batches = []
+        for yfile in sorted(rule.glob('**/*.yaml')):
             rules = read_yaml(yfile)
             if rules:
-                rules = get_mapping(rules)
-                patterns.extend(rules)
-        return patterns
+                rule_batches.append((yfile.as_posix(), get_mapping(rules)))
+        return merge_rules(rule_batches)
     else:
         raise InvalidRuleError('This path is invalid')
+
+
+def merge_rules(rule_batches):
+    """Merge rules from multiple YAML files safely.
+
+    Rule ids are unique within a merged rule set. Rules that share an
+    id are allowed only when their content is identical, in which case the
+    duplicate is dropped to keep loading idempotent. Rules with the same id
+    but conflicting content are rejected before scanning so a later file
+    cannot silently override another rule's pattern, severity or mappings.
+    """
+    merged = []
+    seen = {}
+    for source, rules in rule_batches:
+        for rule in rules:
+            rule_id = rule.get('id') if isinstance(rule, dict) else None
+            if rule_id is None:
+                merged.append(rule)
+                continue
+            if rule_id not in seen:
+                seen[rule_id] = (source, rule)
+                merged.append(rule)
+            elif seen[rule_id][1] != rule:
+                raise DuplicateRuleIdError(
+                    'Conflicting rules with the same id '
+                    f'"{rule_id}" were found in '
+                    f'"{seen[rule_id][0]}" and "{source}". '
+                    'Deduplicate the id or make the rules identical.')
+    return merged
 
 
 def comment_replacer(matches, data):

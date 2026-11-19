@@ -1,0 +1,16 @@
+- id: duplicate_safe_rule
+  message: Same rule shipped in two files
+  input_case: exact
+  pattern: boto3\.client
+  severity: error
+  type: Regex
+  metadata:
+    cwe: cwe-1051
+- id: duplicate_multi_matcher_rule
+  message: Multi matcher rule shipped twice
+  input_case: exact
+  pattern:
+    - boto3
+    - client
+  severity: warning
+  type: RegexAnd

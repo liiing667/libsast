@@ -1,0 +1,16 @@
+- id: override_demo_rule
+  message: Hardcoded network endpoint
+  input_case: exact
+  pattern: boto3\.client
+  severity: error
+  type: Regex
+  metadata:
+    cwe: cwe-1051
+- id: mapping_only_rule
+  message: Hardcoded network endpoint mapping
+  input_case: exact
+  pattern: 8\.8\.8\.8
+  severity: warning
+  type: Regex
+  metadata:
+    cwe: cwe-1051

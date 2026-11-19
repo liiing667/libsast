@@ -73,3 +73,9 @@ class MatcherNotFoundError(LibsastError):
     """Pattern Matcher not found."""
 
     pass
+
+
+class DuplicateRuleIdError(LibsastError):
+    """Rules with the same id but conflicting content were loaded."""
+
+    pass

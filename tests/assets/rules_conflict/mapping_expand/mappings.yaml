@@ -1,0 +1,11 @@
+- id: mapping_expand_rule
+  message: Rule with standard mappings that must be expanded
+  input_case: exact
+  pattern: boto3\.client
+  severity: error
+  type: Regex
+  metadata:
+    cwe: cwe-1051
+    owasp-mobile: m1
+    masvs: storage-3
+    foo: bar
