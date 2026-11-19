@@ -57,6 +57,12 @@ class PatternKeyMissingError(LibsastError):
     pass
 
 
+class InvalidRegexError(LibsastError):
+    """Regex pattern is invalid or exceeds resource limits."""
+
+    pass
+
+
 class RuleDownloadError(LibsastError):
     """Failed to download rule."""
 

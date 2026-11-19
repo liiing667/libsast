@@ -118,6 +118,11 @@ class PatternMatcher:
                     f'Matcher {pattern_name} is not supported.'
                     f' Available matchers are {supported}.')
 
+            if pattern_name in self.matcher.available_patterns:
+                # Fail closed on rules whose regex patterns exceed
+                # resource limits or do not compile.
+                matchers.validate_rule_patterns(rule['pattern'])
+
     @staticmethod
     def _read_file_content(file_path):
         """Read file content with encoding handling."""

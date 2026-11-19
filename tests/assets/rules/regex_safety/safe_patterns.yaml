@@ -1,0 +1,39 @@
+- id: safe_complex_url
+  message: Legit complex rule with classes and groups
+  input_case: exact
+  pattern: https?://[\w.-]+(?:/[\w./-]*)?
+  severity: info
+  type: Regex
+- id: safe_regex_and
+  message: Token assignment and authorization header
+  input_case: exact
+  pattern:
+  - token\s*=\s*"[\w-]{10,}"
+  - Authorization
+  severity: error
+  type: RegexAnd
+- id: safe_regex_or
+  message: Password or api key assignment
+  input_case: exact
+  pattern:
+  - password\s*=\s*"[^"]+"
+  - api[_-]?key\s*=
+  severity: warning
+  type: RegexOr
+- id: safe_regex_and_not
+  message: Private key without dummy marker
+  input_case: exact
+  pattern:
+  - BEGIN PRIVATE KEY
+  - DUMMY
+  severity: error
+  type: RegexAndNot
+- id: safe_regex_and_or
+  message: Example host plus HTTP method
+  input_case: exact
+  pattern:
+  - api\.example\.com
+  - - GET
+    - POST
+  severity: info
+  type: RegexAndOr

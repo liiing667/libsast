@@ -12,7 +12,10 @@ from libsast.core_matcher.helpers import (
     is_file_valid,
     strip_comments,
 )
-from libsast.core_matcher.matchers import get_compiled_pattern
+from libsast.core_matcher.matchers import (
+    get_compiled_pattern,
+    safe_search,
+)
 from libsast import (
     common,
     exceptions,
@@ -136,17 +139,22 @@ class ChoiceMatcher:
     def find_choices(self, data, rule):
         """Find Choices using cached compiled patterns."""
         all_matches = set()
-        for idx, choice in enumerate(rule['choice']):
-            typ = rule['choice_type']
-            if typ == 'and':
-                if all(get_compiled_pattern(and_regx).search(data)
-                       for and_regx in choice[0]):
-                    return (all_matches, [idx])
-            elif get_compiled_pattern(choice[0]).search(data):
-                if typ == 'or':
-                    return (all_matches, [idx])
-                elif typ == 'all':
-                    all_matches.add(choice[1])
+        try:
+            for idx, choice in enumerate(rule['choice']):
+                typ = rule['choice_type']
+                if typ == 'and':
+                    if all(safe_search(get_compiled_pattern(and_regx), data)
+                           for and_regx in choice[0]):
+                        return (all_matches, [idx])
+                elif safe_search(get_compiled_pattern(choice[0]), data):
+                    if typ == 'or':
+                        return (all_matches, [idx])
+                    elif typ == 'all':
+                        all_matches.add(choice[1])
+        except TimeoutError:
+            # Fail closed: a pattern that exceeds its time budget
+            # yields no choice instead of blocking the scan.
+            return (set(), None)
         return (all_matches, None)
 
     def choice_matcher(self, file_contents):

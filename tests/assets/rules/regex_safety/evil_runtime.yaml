@@ -1,0 +1,12 @@
+- id: evil_backtracking
+  message: Catastrophic backtracking pattern
+  input_case: exact
+  pattern: (a|aa)+$
+  severity: error
+  type: Regex
+- id: safe_companion
+  message: Marker that must still be found
+  input_case: exact
+  pattern: SENSITIVE_MARKER
+  severity: info
+  type: Regex

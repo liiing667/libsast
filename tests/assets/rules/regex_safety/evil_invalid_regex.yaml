@@ -1,0 +1,6 @@
+- id: evil_invalid
+  message: Regex that does not compile
+  input_case: exact
+  pattern: (unclosed
+  severity: info
+  type: Regex
