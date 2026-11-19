@@ -1,6 +1,10 @@
 # -*- coding: utf_8 -*-
 """Semantic Grep Core."""
-from libsast.core_sgrep.helpers import get_match_string, invoke_semgrep
+from libsast.core_sgrep.helpers import (
+    get_match_string,
+    incomplete_note,
+    invoke_semgrep,
+)
 from libsast import (
     common,
     standards,
@@ -19,6 +23,7 @@ class SemanticGrep:
         self.findings = {
             'matches': {},
             'errors': [],
+            'complete': True,
         }
         self.standards = standards.get_standards()
 
@@ -42,9 +47,13 @@ class SemanticGrep:
         """Format sgrep results."""
         if not results:
             return
+        if results.get('complete') is False:
+            self.findings['complete'] = False
+            self.findings['errors'].append(
+                incomplete_note(results.get('missing_paths') or []))
         errs = results.get('errors')
         if errs:
-            self.findings['errors'] = errs
+            self.findings['errors'].extend(errs)
         if not results.get('results'):
             return
         smatches = self.findings['matches']

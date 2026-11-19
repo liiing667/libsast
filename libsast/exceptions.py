@@ -73,3 +73,9 @@ class MatcherNotFoundError(LibsastError):
     """Pattern Matcher not found."""
 
     pass
+
+
+class SemgrepError(LibsastError):
+    """Semgrep invocation failed to produce a usable report."""
+
+    pass

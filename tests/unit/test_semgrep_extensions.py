@@ -23,7 +23,7 @@ def test_scan_skips_semgrep_when_no_paths_match_requested_extensions(monkeypatch
     result = scanner.scan([Path('synthetic-benign.txt')])
 
     assert invoked == []
-    assert result == {'matches': {}, 'errors': []}
+    assert result == {'matches': {}, 'errors': [], 'complete': True}
 
 
 def test_scan_only_passes_matching_extensions_to_semgrep(monkeypatch):

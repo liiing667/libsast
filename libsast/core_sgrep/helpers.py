@@ -6,9 +6,25 @@ import os
 import platform
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
+
+from libsast.exceptions import SemgrepError
 
 # Semgrep CE redacts some JSON fields unless logged into Semgrep App.
 _REDACTED = 'requires login'
+
+
+class BatchReport(NamedTuple):
+    """Outcome of one semgrep batch bound to the paths it scanned."""
+
+    paths: list
+    report: dict | None
+    error: str | None
+
+    @property
+    def ok(self):
+        """A batch is complete only when semgrep returned usable JSON."""
+        return self.report is not None
 
 
 def _max_arg_bytes():
@@ -51,25 +67,99 @@ def batch_paths(base_command, paths, max_bytes=None):
     return batches
 
 
-def merge_semgrep_reports(reports):
-    """Merge Semgrep JSON reports from multiple invocations."""
-    merged = {'results': [], 'errors': []}
-    for report in reports:
+def _result_fingerprint(result):
+    """Stable identity of a finding so duplicates are not double counted."""
+    start = result.get('start') or {}
+    end = result.get('end') or {}
+    return (
+        result.get('check_id'),
+        result.get('path'),
+        start.get('line'),
+        start.get('col'),
+        end.get('line'),
+        end.get('col'),
+    )
+
+
+def _error_key(error):
+    """Hashable key for de-duplicating semgrep error entries."""
+    try:
+        return json.dumps(error, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return str(error)
+
+
+def merge_semgrep_reports(batches, requested_paths=None):
+    """Merge per-batch semgrep reports and assess completeness.
+
+    Each BatchReport binds the paths of its batch to the batch outcome.
+    Findings are de-duplicated across batches, and any requested path not
+    covered by a successful batch marks the merged report incomplete.
+    """
+    merged = {
+        'results': [],
+        'errors': [],
+        'complete': True,
+        'scanned_paths': [],
+        'missing_paths': [],
+    }
+    seen_results = set()
+    seen_errors = set()
+    scanned = set()
+
+    def add_error(error):
+        key = _error_key(error)
+        if key not in seen_errors:
+            seen_errors.add(key)
+            merged['errors'].append(error)
+
+    for batch in batches:
+        if batch.error:
+            add_error(batch.error)
+        report = batch.report
         if not report:
             continue
-        merged['results'].extend(report.get('results') or [])
+        scanned.update(batch.paths)
+        for result in report.get('results') or []:
+            fingerprint = _result_fingerprint(result)
+            if fingerprint in seen_results:
+                continue
+            seen_results.add(fingerprint)
+            merged['results'].append(result)
         errors = report.get('errors')
         if not errors:
             continue
-        if isinstance(errors, list):
-            merged['errors'].extend(errors)
-        else:
-            merged['errors'].append(errors)
+        if not isinstance(errors, list):
+            errors = [errors]
+        for error in errors:
+            add_error(error)
+    merged['scanned_paths'] = sorted(scanned)
+    if requested_paths is not None:
+        merged['missing_paths'] = [
+            path for path in requested_paths if path not in scanned]
+    merged['complete'] = not merged['missing_paths'] and all(
+        batch.ok for batch in batches)
     return merged
 
 
+def incomplete_note(missing_paths):
+    """Human-readable summary of paths missing from a merged report."""
+    count = len(missing_paths)
+    if not count:
+        return 'semgrep scan is incomplete: some batches failed'
+    shown = ', '.join(str(path) for path in missing_paths[:5])
+    more = f' and {count - 5} more' if count > 5 else ''
+    return (
+        f'semgrep scan is incomplete: {count} file(s) not scanned: '
+        f'{shown}{more}')
+
+
 def _run_semgrep_command(command):
-    """Run one Semgrep command and return parsed JSON or an error report."""
+    """Run one semgrep command and return the parsed JSON report.
+
+    Raises SemgrepError when no usable report was produced and OSError
+    with E2BIG when the argument list is too long.
+    """
     try:
         result = subprocess.run(
             command,
@@ -78,58 +168,66 @@ def _run_semgrep_command(command):
             check=False,
         )
     except FileNotFoundError:
-        return {
-            'results': [],
-            'errors': ['semgrep not found. Install with: pip install semgrep'],
-        }
+        raise SemgrepError(
+            'semgrep not found. Install with: pip install semgrep',
+        ) from None
     except OSError as exc:
         # Errno 7 / E2BIG: Argument list too long
         if exc.errno in {errno.E2BIG, 7}:
             raise
-        return {'results': [], 'errors': [str(exc)]}
+        raise SemgrepError(str(exc)) from exc
 
     raw = result.stdout or ''
     if not raw:
         err = (result.stderr or '').strip()
-        return {'results': [], 'errors': [err] if err else []}
+        raise SemgrepError(err or 'semgrep produced no output')
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
-        return {'results': [], 'errors': [str(exc)]}
+        raise SemgrepError(
+            f'semgrep output was not valid JSON: {exc}') from exc
 
 
 def _invoke_semgrep_batched(base_command, paths, max_bytes=None):
-    """Run Semgrep in argv-safe batches; bisect on E2BIG."""
+    """Run semgrep in argv-safe batches; bisect on E2BIG.
+
+    The merged report is marked incomplete when any requested path was
+    not covered by a successful batch.
+    """
     if max_bytes is None:
         max_bytes = _max_arg_bytes()
-    reports = []
+    if not paths:
+        return merge_semgrep_reports([], requested_paths=[])
+    batches = []
 
     def run_batch(batch):
         command = base_command + batch
         try:
-            reports.append(_run_semgrep_command(command))
-            return
+            report = _run_semgrep_command(command)
         except OSError as exc:
             if exc.errno not in {errno.E2BIG, 7}:
-                reports.append({'results': [], 'errors': [str(exc)]})
+                batches.append(BatchReport(batch, None, str(exc)))
                 return
             if len(batch) <= 1:
                 path = batch[0] if batch else ''
-                reports.append({
-                    'results': [],
-                    'errors': [
-                        'Argument list too long when invoking semgrep'
-                        f' on path: {path}',
-                    ],
-                })
+                batches.append(BatchReport(
+                    batch,
+                    None,
+                    'Argument list too long when invoking semgrep'
+                    f' on path: {path}'))
                 return
             mid = len(batch) // 2
             run_batch(batch[:mid])
             run_batch(batch[mid:])
+            return
+        except SemgrepError as exc:
+            batches.append(BatchReport(batch, None, str(exc)))
+            return
+        batches.append(BatchReport(batch, report, None))
 
     for batch in batch_paths(base_command, paths, max_bytes):
         run_batch(batch)
-    return merge_semgrep_reports(reports)
+    return merge_semgrep_reports(batches, requested_paths=paths)
 
 
 def invoke_semgrep(paths, scan_rules):
