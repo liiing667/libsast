@@ -1,6 +1,8 @@
 # -*- coding: utf_8 -*-
 """Semantic Grep Core."""
 from libsast.core_sgrep.helpers import get_match_string, invoke_semgrep
+from libsast.exceptions import SourceReadError
+from libsast.source_reader import check_source_readable, read_diagnostic
 from libsast import (
     common,
     standards,
@@ -28,6 +30,10 @@ class SemanticGrep:
             paths = [sfile for sfile in paths if sfile.suffix.lower() in self.exts]
             if not paths:
                 return self.findings
+        # Shared coverage conclusion: an unreadable scannable file fails
+        # the scan instead of being silently skipped by the engine.
+        for sfile in paths:
+            check_source_readable(sfile)
         if self.show_progress:
             pbar = common.ProgressBar('Semantic Grep', len(paths))
             sgrep_out = pbar.progress_function(
@@ -35,8 +41,53 @@ class SemanticGrep:
                 (paths, self.scan_rules))
         else:
             sgrep_out = invoke_semgrep(paths, self.scan_rules)
+        self.raise_on_unreadable_source(sgrep_out, paths)
         self.format_output(sgrep_out)
         return self.findings
+
+    @staticmethod
+    def raise_on_unreadable_source(results, paths):
+        """Convert engine-side read failures into SourceReadError.
+
+        Files that vanish after the preflight (or engines refusing an
+        unreadable scanning root) surface here as error entries, so they
+        reach the same machine-readable diagnostic as the other paths.
+        Non-fatal engine warnings (for example lexical warnings) keep the
+        legacy behavior of being recorded in the findings report.
+        """
+        if not results or not results.get('errors'):
+            return
+        diagnostics = []
+        by_posix = {sfile.as_posix(): sfile for sfile in paths}
+        for err in results['errors']:
+            if isinstance(err, dict):
+                reason = f"{err.get('type', 'error')}: {err.get('message', '')}"
+                file_name = err.get('path') or err.get('message') or ''
+                level = str(err.get('level', '')).lower()
+                err_type = str(err.get('type', '')).lower()
+                message = str(err.get('message', '')).lower()
+                read_failure = any(token in err_type for token in (
+                    'semgreperror', 'oserror', 'ioerror', 'filenotfound',
+                    'permission',
+                )) or any(token in message for token in (
+                    'not readable',
+                    'invalid scanning root',
+                    'no such file',
+                    'permission denied',
+                ))
+                if level == 'warn' or not read_failure:
+                    continue
+            else:
+                reason = str(err)
+                file_name = str(err)
+            sfile = by_posix.get(file_name)
+            diagnostics.append(read_diagnostic(sfile or file_name, reason))
+        if not diagnostics:
+            return
+        raise SourceReadError.from_diagnostics(
+            'Semgrep could not read source files; scan is incomplete.',
+            diagnostics,
+        )
 
     def format_output(self, results):
         """Format sgrep results."""

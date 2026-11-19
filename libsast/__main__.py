@@ -6,6 +6,7 @@ import json
 import sys
 
 from libsast import __version__
+from libsast.exceptions import SourceReadError
 from libsast.scanner import Scanner
 
 
@@ -31,6 +32,29 @@ def output(out, scan_results):
         if sgrep_out or matcher_out or ts_out:
             sys.exit(1)
     sys.exit(0)
+
+
+def output_read_error(out, error):
+    """Emit machine-readable unreadable-source diagnostics and fail."""
+    report = {
+        'status': 'incomplete',
+        'error': 'SourceReadError',
+        'message': str(error),
+        'unreadable_sources': error.diagnostics,
+    }
+    if out:
+        with open(out, 'w') as outfile:
+            json.dump(report,
+                      outfile,
+                      sort_keys=True,
+                      indent=2,
+                      separators=(',', ': '))
+    else:
+        print(json.dumps(report,
+                         sort_keys=True,
+                         indent=2,
+                         separators=(',', ': ')))
+    sys.exit(2)
 
 
 def main():
@@ -115,7 +139,10 @@ def main():
             'cpu_core': args.cpu_core,
             'multiprocessing': args.multiprocessing,
         }
-        result = Scanner(options, args.path).scan()
+        try:
+            result = Scanner(options, args.path).scan()
+        except SourceReadError as exp:
+            output_read_error(args.output, exp)
         output(args.output, result)
     elif args.version:
         print(f'libsast v{__version__}')

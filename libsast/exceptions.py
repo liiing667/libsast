@@ -73,3 +73,20 @@ class MatcherNotFoundError(LibsastError):
     """Pattern Matcher not found."""
 
     pass
+
+
+class SourceReadError(LibsastError):
+    """One or more scannable source files could not be read.
+
+    Treating such files as empty would hide findings, so the scan fails
+    closed. Machine-readable diagnostics are attached for tooling.
+    """
+
+    diagnostics = []
+
+    @classmethod
+    def from_diagnostics(cls, message, diagnostics):
+        """Build the error with attached machine-readable diagnostics."""
+        error = cls(message)
+        error.diagnostics = diagnostics or []
+        return error

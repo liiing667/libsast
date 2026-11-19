@@ -9,12 +9,12 @@ from functools import lru_cache
 
 from libsast.core_matcher.helpers import (
     get_rules,
-    is_file_valid,
     strip_comments,
 )
 from libsast.core_matcher import matchers
 from libsast.core_treesitter.matchers import TS_MATCHERS
 from libsast.core_treesitter.ts_matcher import match_ts_rules_on_file
+from libsast.source_reader import load_source_files
 from libsast import (
     common,
     exceptions,
@@ -45,20 +45,7 @@ class PatternMatcher:
 
     def read_file_contents(self, paths: list) -> list:
         """Load file(s) content."""
-        if not paths:
-            return []
-
-        files_to_scan = {
-            sfile for sfile in paths
-            if is_file_valid(sfile, self.exts, 5)
-        }
-        if not files_to_scan:
-            return []
-
-        with ThreadPoolExecutor() as io_executor:
-            file_contents = list(io_executor.map(
-                self._read_file_content, files_to_scan))
-            return file_contents
+        return load_source_files(paths, self.exts, 5)
 
     def regex_scan(self, file_contents: list, rules=None) -> dict:
         """Scan file(s) content."""
@@ -117,15 +104,6 @@ class PatternMatcher:
                 raise exceptions.MatcherNotFoundError(
                     f'Matcher {pattern_name} is not supported.'
                     f' Available matchers are {supported}.')
-
-    @staticmethod
-    def _read_file_content(file_path):
-        """Read file content with encoding handling."""
-        try:
-            return file_path, file_path.read_text('utf-8', 'ignore')
-        except Exception as e:
-            print(f'Error reading {file_path}: {e}')
-            return file_path, ''
 
     def _match_regex_rules(self, file_path, data, regex_rules):
         """Run regex rules against formatted file content."""

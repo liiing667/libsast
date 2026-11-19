@@ -293,6 +293,33 @@ $ libsast -s tests/assets/rules/semantic_grep/ -p tests/assets/rules/pattern_mat
 >>> scanner.scan()
 ```
 
+## Unreadable source files
+
+All three engines (regex, tree-sitter and Semgrep) apply the same coverage
+rule: a file selected for scanning that cannot be read (permission denied,
+or it vanishes mid-scan) is a scan-completeness failure. The scan raises
+`libsast.exceptions.SourceReadError` instead of silently treating the file
+as empty and reporting a successful "no findings" result. The exception
+carries a machine-readable `diagnostics` list, and the CLI prints the same
+report as JSON and exits with status code `2`.
+
+```json
+{
+  "error": "SourceReadError",
+  "message": "Failed to read source files; scan is incomplete.",
+  "status": "incomplete",
+  "unreadable_sources": [
+    {
+      "file_path": "/path/to/unreadable.py",
+      "reason": "PermissionError: [Errno 13] Permission denied"
+    }
+  ]
+}
+```
+
+Legitimate empty files and files excluded by extension, size or ignore
+rules are not considered errors.
+
 ## Write your own Static Analysis tool
 
 With libsast, you can write your own static analysis tools. libsast provides three matching engines:

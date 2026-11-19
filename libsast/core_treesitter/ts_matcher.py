@@ -12,8 +12,8 @@ from libsast import (
 )
 from libsast.core_matcher.helpers import (
     get_rules,
-    is_file_valid,
 )
+from libsast.source_reader import load_source_files
 from libsast.core_treesitter.languages import (
     extract_script_bytes,
     resolve_file_language,
@@ -111,17 +111,8 @@ class TreeSitterMatcher:
 
     def read_file_contents(self, paths: list) -> list:
         """Load file(s) content."""
-        if not paths:
-            return []
-        files_to_scan = {
-            sfile for sfile in paths
-            if is_file_valid(sfile, self.exts, self.max_size_mb)
-        }
-        if not files_to_scan:
-            return []
-        with ThreadPoolExecutor() as io_executor:
-            return list(io_executor.map(
-                self._read_file_content, files_to_scan))
+        return load_source_files(
+            paths, self.exts, self.max_size_mb)
 
     def ast_scan(self, file_contents: list, rules=None) -> dict:
         """Scan file(s) content with tree-sitter rules."""
@@ -166,15 +157,6 @@ class TreeSitterMatcher:
                 raise exceptions.MatcherNotFoundError(
                     f'Matcher {pattern_name} is not supported.'
                     f' Available matchers are {supported}.')
-
-    @staticmethod
-    def _read_file_content(file_path):
-        """Read file content with encoding handling."""
-        try:
-            return file_path, file_path.read_text('utf-8', 'ignore')
-        except Exception as e:
-            print(f'Error reading {file_path}: {e}')
-            return file_path, ''
 
     def ts_matcher(self, file_data):
         """Run tree-sitter rules against one file."""

@@ -9,10 +9,10 @@ from functools import lru_cache
 
 from libsast.core_matcher.helpers import (
     get_rules,
-    is_file_valid,
     strip_comments,
 )
 from libsast.core_matcher.matchers import get_compiled_pattern
+from libsast.source_reader import load_source_files
 from libsast import (
     common,
     exceptions,
@@ -39,31 +39,28 @@ class ChoiceMatcher:
         file_contents = self.read_file_contents(paths)
         return self.regex_scan(file_contents)
 
-    def _load_formatted_paths(self, unique_paths):
-        """Read and format all unique candidate paths in parallel."""
-        path_list = list(unique_paths)
-        with ThreadPoolExecutor() as io_executor:
-            formatted_list = list(io_executor.map(
-                self._read_formatted_path, path_list))
-        return {
-            p: d for p, d in zip(path_list, formatted_list) if d is not None
-        }
-
     def read_file_contents(self, paths: list) -> list:
         """Load file(s) content once and pair with each choice rule."""
         if not paths or not self.scan_rules:
             return []
 
         alt_path = Path(self.alternative_path) if self.alternative_path else None
+        candidate_paths = set(paths)
+        if alt_path:
+            candidate_paths.add(alt_path)
+        path_to_raw = dict(
+            load_source_files(candidate_paths, self.exts, 5))
         rule_paths = []
-        unique_paths = set()
         for rule in self.scan_rules:
             scan_paths = [alt_path] if (
                 rule['type'] != 'code' and alt_path) else paths
             rule_paths.append((scan_paths, rule))
-            unique_paths.update(scan_paths)
 
-        path_to_data = self._load_formatted_paths(unique_paths)
+        path_to_data = {}
+        for sfile, data in path_to_raw.items():
+            formatted = self._format_content(data, sfile.suffix.lower())
+            if formatted is not None:
+                path_to_data[sfile] = formatted
         return [
             [
                 (path_to_data[p], rule)
@@ -72,18 +69,6 @@ class ChoiceMatcher:
             ]
             for scan_paths, rule in rule_paths
         ]
-
-    def _read_formatted_path(self, sfile):
-        """Read and strip comments for a single file once."""
-        if not is_file_valid(sfile, self.exts, 5):
-            return None
-        try:
-            return self._format_content(
-                sfile.read_text('utf-8', 'ignore'),
-                sfile.suffix.lower())
-        except Exception as e:
-            raise exceptions.RuleProcessingError(
-                f'Error reading file: {sfile}') from e
 
     def regex_scan(self, file_contents: list, rules=None) -> dict:
         """Process regex matches on the file contents."""
