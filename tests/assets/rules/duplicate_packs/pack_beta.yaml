@@ -1,0 +1,14 @@
+- id: shared_vuln
+  message: Shared vulnerability from beta pack
+  input_case: exact
+  pattern: DANGEROUS_API\(
+  severity: error
+  type: Regex
+  metadata:
+    cwe: cwe-1051
+- id: beta_only
+  message: Rule present only in beta
+  input_case: exact
+  pattern: BETA_MARKER
+  severity: info
+  type: Regex

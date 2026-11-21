@@ -1,6 +1,5 @@
 # -*- coding: utf_8 -*-
 """Pattern Matcher."""
-from operator import itemgetter
 from concurrent.futures import (
     ProcessPoolExecutor,
     ThreadPoolExecutor,
@@ -15,6 +14,10 @@ from libsast.core_matcher.helpers import (
 from libsast.core_matcher import matchers
 from libsast.core_treesitter.matchers import TS_MATCHERS
 from libsast.core_treesitter.ts_matcher import match_ts_rules_on_file
+from libsast.findings import (
+    FindingStore,
+    rulepack_name,
+)
 from libsast import (
     common,
     exceptions,
@@ -24,7 +27,10 @@ from libsast import (
 class PatternMatcher:
     def __init__(self, options: dict) -> None:
         self.matcher = matchers.MatchCommand()
-        self.scan_rules = get_rules(options.get('match_rules'))
+        rule_loc = options.get('match_rules')
+        self.rule_loc = rule_loc
+        self.rulepack = rulepack_name(rule_loc)
+        self.scan_rules = get_rules(rule_loc)
         self.show_progress = options.get('show_progress')
         self.cpu = options.get('cpu_core')
         self.multiprocessing = options.get('multiprocessing')
@@ -32,7 +38,7 @@ class PatternMatcher:
         self.ts_max_match_len = options.get('ts_max_match_length') or 300
         exts = options.get('match_extensions')
         self.exts = [ext.lower() for ext in exts] if exts else []
-        self.findings = {}
+        self.findings = FindingStore('pattern_matcher')
 
     def scan(self, paths: list) -> dict:
         """Scan file(s) or directory."""
@@ -63,6 +69,7 @@ class PatternMatcher:
     def regex_scan(self, file_contents: list, rules=None) -> dict:
         """Scan file(s) content."""
         if rules:
+            self.rulepack = rulepack_name(rules)
             self.scan_rules = get_rules(rules)
         if not (self.scan_rules and file_contents):
             return {}
@@ -92,7 +99,7 @@ class PatternMatcher:
                 )
 
         self.add_finding(results)
-        return self.findings
+        return self.findings.finalize()
 
     def validate_rules(self):
         """Validate Rules before scanning."""
@@ -194,25 +201,8 @@ class PatternMatcher:
                 continue
             for match_dict in res_list:
                 rule = match_dict['rule']
-                rule_id = rule['id']
-                files = self.findings.setdefault(
-                    rule_id, {'files': [], 'metadata': {}})['files']
-
                 for match in match_dict['matches']:
-                    file_details = {
-                        'file_path': match_dict['file'],
-                        'match_string': match[0],
-                        'match_position': match[1],
-                        'match_lines': match[2],
-                    }
-                    files.append(file_details)
-
-                if not self.findings[rule_id]['metadata']:
-                    meta = rule.get('metadata', {})
-                    meta['description'] = rule['message']
-                    meta['severity'] = rule['severity']
-                    self.findings[rule_id]['metadata'] = meta
-
-        sort_key = itemgetter('file_path', 'match_string', 'match_lines')
-        for details in self.findings.values():
-            details['files'].sort(key=sort_key)
+                    self.findings.add_evidence(
+                        rule,
+                        match,
+                        file_path=match_dict['file'])

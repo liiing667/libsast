@@ -1,0 +1,5 @@
+DANGEROUS_API("first call")
+some safe line
+DANGEROUS_API("second call")
+ALPHA_MARKER
+BETA_MARKER

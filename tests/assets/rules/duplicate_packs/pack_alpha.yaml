@@ -1,0 +1,12 @@
+- id: shared_vuln
+  message: Shared vulnerability from alpha pack
+  input_case: exact
+  pattern: DANGEROUS_API\(
+  severity: warning
+  type: Regex
+- id: alpha_only
+  message: Rule present only in alpha
+  input_case: exact
+  pattern: ALPHA_MARKER
+  severity: info
+  type: Regex

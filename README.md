@@ -283,6 +283,35 @@ $ libsast -s tests/assets/rules/semantic_grep/ -p tests/assets/rules/pattern_mat
 }
 ```
 
+## Stable Finding Identity and Provenance
+
+When the same vulnerability is matched by more than one rulepack or
+matcher (for example two rule files shipping the same rule `id`, or a
+regex and a Tree-sitter rule hitting the same location), libsast merges
+the evidence into a single finding instead of letting scan scheduling
+decide which rule wins. Every finding and match location therefore has a
+stable identifier that only depends on intrinsic rule and location data,
+so rescans produce the same ids and the same severity.
+
+* `finding_id`: stable identifier (`LS-` prefix) derived from the rule
+  `id`; identical across rescans and independent of processing order.
+* `evidence[].evidence_id`: stable identifier (`LE-` prefix) for an
+  individual match location (rule id, file, lines, position, text).
+* `rulepacks` / `evidence[].rulepacks`: the rulepacks (YAML rule files)
+  that contributed to the finding/evidence.
+* `matchers` / `evidence[].matchers`: the matcher types that matched,
+  e.g. `Regex`, `TreeSitter` or `semantic_grep`.
+* `evidence[].provenance`: one entry per contributing rule with its
+  `rulepack`, `matcher`, `matcher_engine` and `rule_id`, so a report can
+  state exactly which rulepack, matcher and location produced each hit.
+* `metadata.severity`: the highest severity among the contributing
+  rules, resolved deterministically (Semgrep's uppercase severities are
+  normalized, e.g. `ERROR` -> `error`).
+
+Evidence pointing at the exact same location is deduplicated while the
+provenance of every contributing rule is preserved. The legacy `files`
+list and `metadata` fields remain available for backward compatibility.
+
 ## Python API
 
 ```python

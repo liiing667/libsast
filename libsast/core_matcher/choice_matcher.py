@@ -13,6 +13,10 @@ from libsast.core_matcher.helpers import (
     strip_comments,
 )
 from libsast.core_matcher.matchers import get_compiled_pattern
+from libsast.findings import (
+    FindingStore,
+    rulepack_name,
+)
 from libsast import (
     common,
     exceptions,
@@ -21,14 +25,17 @@ from libsast import (
 
 class ChoiceMatcher:
     def __init__(self, options: dict) -> None:
-        self.scan_rules = get_rules(options.get('choice_rules'))
+        rule_loc = options.get('choice_rules')
+        self.rule_loc = rule_loc
+        self.rulepack = rulepack_name(rule_loc)
+        self.scan_rules = get_rules(rule_loc)
         self.show_progress = options.get('show_progress')
         self.cpu = options.get('cpu_core')
         self.multiprocessing = options.get('multiprocessing')
         self.alternative_path = options.get('alternative_path')
         exts = options.get('choice_extensions')
         self.exts = [ext.lower() for ext in exts] if exts else []
-        self.findings = {}
+        self.findings = FindingStore('choice_matcher')
 
     def scan(self, paths: list) -> dict:
         """Scan file(s) or directory per rule."""
@@ -66,7 +73,7 @@ class ChoiceMatcher:
         path_to_data = self._load_formatted_paths(unique_paths)
         return [
             [
-                (path_to_data[p], rule)
+                (p, path_to_data[p], rule)
                 for p in scan_paths
                 if p in path_to_data
             ]
@@ -88,6 +95,7 @@ class ChoiceMatcher:
     def regex_scan(self, file_contents: list, rules=None) -> dict:
         """Process regex matches on the file contents."""
         if rules:
+            self.rulepack = rulepack_name(rules)
             self.scan_rules = get_rules(rules)
         if not (self.scan_rules and file_contents):
             return {}
@@ -114,7 +122,7 @@ class ChoiceMatcher:
                     chunksize=chunksize))
 
         self.add_finding(results)
-        return self.findings
+        return self.finalize_choice_metadata()
 
     def validate_rules(self):
         """Validate Rules before scanning."""
@@ -152,9 +160,11 @@ class ChoiceMatcher:
     def choice_matcher(self, file_contents):
         """Process regex matches on the file contents."""
         results = []
-        for data, rule in file_contents:
+        for file_path, data, rule in file_contents:
             match = self.find_choices(data, rule)
             results.append({
+                'file': file_path.as_posix()
+                if isinstance(file_path, Path) else str(file_path),
                 'rule': rule,
                 'matches': match[1] if isinstance(match, tuple) else set(),
                 'all_matches': match[0] if isinstance(match, tuple) else match,
@@ -167,7 +177,7 @@ class ChoiceMatcher:
         return strip_comments(data, file_suffix)
 
     def add_finding(self, results):
-        """Add Choice Findings and generate metadata."""
+        """Add Choice Findings, generate metadata and record locations."""
         for res_list in results:
             if not res_list:
                 continue
@@ -194,6 +204,44 @@ class ChoiceMatcher:
                         'type',
                         'choice_type',
                         'selection',
-                        'else'}}}
+                        'else',
+                        '_rulepack',
+                        '_matcher_engine',
+                        'metadata',
+                        'severity'}}}
+                # Persist choice-specific metadata through the shared store.
+                rule_with_meta = dict(rule)
+                rule_with_meta.setdefault('metadata', {})
+                rule_with_meta['metadata'].update(meta_dict)
+                if 'severity' not in rule_with_meta:
+                    rule_with_meta['severity'] = rule.get('severity', 'info')
+                file_path = match_dict.get('file')
+                if file_path:
+                    # Choice rules describe a file-level condition; record
+                    # the file location so evidence remains attributable.
+                    self.findings.add_evidence(
+                        rule_with_meta,
+                        {
+                            'file_path': file_path,
+                            'match_string': selection,
+                            'match_position': (0, 0),
+                            'match_lines': (1, 1),
+                        })
+                else:
+                    self.findings._merge_metadata(
+                        self.findings._entry(rule_with_meta), rule_with_meta)
 
-                self.findings[rule['id']] = meta_dict
+    def finalize_choice_metadata(self):
+        """Deterministically resolve per-file choice text in metadata."""
+        findings = self.findings.finalize()
+        for entry in findings.values():
+            # The flat metadata can only hold one choice string; pick the
+            # alphabetically first evidence text so rescans stay stable.
+            choices = sorted({
+                evidence['match_string']
+                for evidence in entry['evidence']
+                if evidence.get('match_string')
+            })
+            if choices:
+                entry['metadata']['choice'] = choices[0]
+        return findings

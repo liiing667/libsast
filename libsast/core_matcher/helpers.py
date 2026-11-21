@@ -44,23 +44,35 @@ def get_rules(rule_loc):  # noqa: R701
         rules = read_yaml(pat, True)
         if not rules:
             return
-        return get_mapping(rules)
+        return _annotate_pack(get_mapping(rules), rule_loc)
     rule = Path(rule_loc)
     if rule.is_file() and rule.exists():
         rules = read_yaml(rule)
         if not rules:
             return
-        return get_mapping(rules)
+        return _annotate_pack(get_mapping(rules), rule_loc)
     elif rule.is_dir() and rule.exists():
         patterns = []
         for yfile in rule.glob('**/*.yaml'):
             rules = read_yaml(yfile)
             if rules:
                 rules = get_mapping(rules)
-                patterns.extend(rules)
+                patterns.extend(_annotate_pack(rules, yfile))
         return patterns
     else:
         raise InvalidRuleError('This path is invalid')
+
+
+def _annotate_pack(rules, source):
+    """Tag every rule with the rulepack (YAML file/URL) it came from."""
+    from libsast.findings import rulepack_name
+
+    pack = rulepack_name(source)
+    for rule in rules or ():
+        if isinstance(rule, dict):
+            rule.setdefault('_rulepack', pack)
+            rule['_rule_loc'] = str(source)
+    return rules
 
 
 def comment_replacer(matches, data):

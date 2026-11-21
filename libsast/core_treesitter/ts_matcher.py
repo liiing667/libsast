@@ -4,11 +4,14 @@ from concurrent.futures import (
     ProcessPoolExecutor,
     ThreadPoolExecutor,
 )
-from operator import itemgetter
 
 from libsast import (
     common,
     exceptions,
+)
+from libsast.findings import (
+    FindingStore,
+    rulepack_name,
 )
 from libsast.core_matcher.helpers import (
     get_rules,
@@ -88,6 +91,8 @@ class TreeSitterMatcher:
     def __init__(self, options: dict) -> None:
         has_ts_rules = bool(options.get('ts_rules'))
         rule_loc = options.get('ts_rules') or options.get('match_rules')
+        self.rule_loc = rule_loc
+        self.rulepack = rulepack_name(rule_loc)
         self.scan_rules = get_rules(rule_loc) if rule_loc else []
         self.show_progress = options.get('show_progress')
         self.cpu = options.get('cpu_core') or 1
@@ -99,7 +104,7 @@ class TreeSitterMatcher:
         if not exts and not has_ts_rules:
             exts = options.get('match_extensions')
         self.exts = [ext.lower() for ext in exts] if exts else []
-        self.findings = {}
+        self.findings = FindingStore('treesitter_matcher')
 
     def scan(self, paths: list) -> dict:
         """Scan file(s) or directory with tree-sitter AST rules."""
@@ -126,6 +131,7 @@ class TreeSitterMatcher:
     def ast_scan(self, file_contents: list, rules=None) -> dict:
         """Scan file(s) content with tree-sitter rules."""
         if rules:
+            self.rulepack = rulepack_name(rules)
             self.scan_rules = get_rules(rules)
         if not (self.scan_rules and file_contents):
             return {}
@@ -146,7 +152,7 @@ class TreeSitterMatcher:
                     self.ts_matcher, file_contents, chunksize=chunksize))
 
         self.add_finding(results)
-        return self.findings
+        return self.findings.finalize()
 
     def validate_rules(self):
         """Validate tree-sitter rules before scanning."""
@@ -199,25 +205,8 @@ class TreeSitterMatcher:
                 continue
             for match_dict in res_list:
                 rule = match_dict['rule']
-                rule_id = rule['id']
-                files = self.findings.setdefault(
-                    rule_id, {'files': [], 'metadata': {}})['files']
-
                 for match in match_dict['matches']:
-                    file_details = {
-                        'file_path': match_dict['file'],
-                        'match_string': match[0],
-                        'match_position': match[1],
-                        'match_lines': match[2],
-                    }
-                    files.append(file_details)
-
-                if not self.findings[rule_id]['metadata']:
-                    meta = dict(rule.get('metadata', {}) or {})
-                    meta['description'] = rule['message']
-                    meta['severity'] = rule['severity']
-                    self.findings[rule_id]['metadata'] = meta
-
-        sort_key = itemgetter('file_path', 'match_string', 'match_lines')
-        for details in self.findings.values():
-            details['files'].sort(key=sort_key)
+                    self.findings.add_evidence(
+                        rule,
+                        match,
+                        file_path=match_dict['file'])
