@@ -293,6 +293,27 @@ $ libsast -s tests/assets/rules/semantic_grep/ -p tests/assets/rules/pattern_mat
 >>> scanner.scan()
 ```
 
+### Cancelling a scan
+
+A scan is published as one complete batch. Pass a shared
+`CancellationToken` in the options (or call `scanner.cancel()`) to stop a
+scan cooperatively. A cancelled scan raises
+`libsast.exceptions.ScanCancelledError` instead of returning a report with
+only some findings, and every matcher resets its state so a retry over the
+same paths never counts a file twice.
+
+```python
+>>> from libsast import Scanner, CancellationToken
+>>> from libsast.exceptions import ScanCancelledError
+>>> token = CancellationToken()
+>>> scanner = Scanner({**options, 'cancel_token': token}, paths)
+>>> token.cancel()  # or scanner.cancel()
+>>> try:
+...     scanner.scan()
+... except ScanCancelledError:
+...     pass  # nothing was published; a fresh scan returns full results
+```
+
 ## Write your own Static Analysis tool
 
 With libsast, you can write your own static analysis tools. libsast provides three matching engines:

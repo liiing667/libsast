@@ -11,19 +11,26 @@ class SemanticGrep:
     def __init__(self, options: dict) -> None:
         self.scan_rules = options.get('sgrep_rules')
         self.show_progress = options.get('show_progress')
+        self.token = options.get('cancel_token')
         exts = options.get('sgrep_extensions')
         if exts:
             self.exts = [ext.lower() for ext in exts]
         else:
             self.exts = []
-        self.findings = {
-            'matches': {},
-            'errors': [],
-        }
+        self.findings = self._empty_findings()
         self.standards = standards.get_standards()
+
+    @staticmethod
+    def _empty_findings():
+        return {'matches': {}, 'errors': []}
 
     def scan(self, paths: list) -> dict:
         """Do sgrep scan."""
+        # Reset state so a retry never appends to a previous attempt.
+        self.findings = self._empty_findings()
+        paths = sorted(paths, key=lambda p: p.as_posix())
+        if self.token is not None:
+            self.token.raise_if_cancelled()
         if self.exts:
             paths = [sfile for sfile in paths if sfile.suffix.lower() in self.exts]
             if not paths:
@@ -35,6 +42,8 @@ class SemanticGrep:
                 (paths, self.scan_rules))
         else:
             sgrep_out = invoke_semgrep(paths, self.scan_rules)
+        if self.token is not None:
+            self.token.raise_if_cancelled()
         self.format_output(sgrep_out)
         return self.findings
 
@@ -42,12 +51,16 @@ class SemanticGrep:
         """Format sgrep results."""
         if not results:
             return
+        # Build the new report locally and publish the complete batch in one
+        # assignment; cancelled or failed scans never expose partial state.
+        findings = self._empty_findings()
         errs = results.get('errors')
         if errs:
-            self.findings['errors'] = errs
+            findings['errors'] = errs
         if not results.get('results'):
+            self.findings = findings
             return
-        smatches = self.findings['matches']
+        smatches = findings['matches']
         for find in results['results']:
             file_path = find['path']
             start_line = find['start']['line']
@@ -75,6 +88,7 @@ class SemanticGrep:
                     'metadata': metadata,
                 }
                 self.expand_mappings(smatches[rule_id])
+        self.findings = findings
 
     def expand_mappings(self, meta):
         """Expand libsast standard mappings."""

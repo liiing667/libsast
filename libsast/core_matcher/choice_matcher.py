@@ -1,10 +1,6 @@
 # -*- coding: utf_8 -*-
 """Choice Matcher."""
 from pathlib import Path
-from concurrent.futures import (
-    ProcessPoolExecutor,
-    ThreadPoolExecutor,
-)
 from functools import lru_cache
 
 from libsast.core_matcher.helpers import (
@@ -25,6 +21,7 @@ class ChoiceMatcher:
         self.show_progress = options.get('show_progress')
         self.cpu = options.get('cpu_core')
         self.multiprocessing = options.get('multiprocessing')
+        self.token = options.get('cancel_token')
         self.alternative_path = options.get('alternative_path')
         exts = options.get('choice_extensions')
         self.exts = [ext.lower() for ext in exts] if exts else []
@@ -32,19 +29,27 @@ class ChoiceMatcher:
 
     def scan(self, paths: list) -> dict:
         """Scan file(s) or directory per rule."""
+        # Each invocation starts from empty state so retries never combine
+        # partial findings produced by an earlier cancelled attempt.
+        self.findings = {}
+        paths = sorted(paths, key=lambda p: p.as_posix())
+        self.scan_rules = list(self.scan_rules)
+        if self.token is not None:
+            self.token.raise_if_cancelled()
         if self.show_progress:
             pbar = common.ProgressBar('Choice Match', len(self.scan_rules))
-            self.scan_rules = pbar.progress_loop(self.scan_rules)
+            self.scan_rules = list(
+                pbar.iter_progress(self.scan_rules, token=self.token))
 
         file_contents = self.read_file_contents(paths)
         return self.regex_scan(file_contents)
 
     def _load_formatted_paths(self, unique_paths):
         """Read and format all unique candidate paths in parallel."""
-        path_list = list(unique_paths)
-        with ThreadPoolExecutor() as io_executor:
-            formatted_list = list(io_executor.map(
-                self._read_formatted_path, path_list))
+        path_list = sorted(unique_paths, key=lambda p: p.as_posix())
+        formatted_list = common.cancellable_map(
+            'thread', None, self._read_formatted_path, path_list,
+            token=self.token)
         return {
             p: d for p, d in zip(path_list, formatted_list) if d is not None
         }
@@ -58,6 +63,8 @@ class ChoiceMatcher:
         rule_paths = []
         unique_paths = set()
         for rule in self.scan_rules:
+            if self.token is not None:
+                self.token.raise_if_cancelled()
             scan_paths = [alt_path] if (
                 rule['type'] != 'code' and alt_path) else paths
             rule_paths.append((scan_paths, rule))
@@ -94,27 +101,10 @@ class ChoiceMatcher:
         self.validate_rules()
 
         chunksize = max(1, len(file_contents) // ((self.cpu or 1) * 4))
-        if self.multiprocessing == 'billiard':
-            from billiard import Pool
-            with Pool(processes=self.cpu) as pool:
-                results = pool.map(
-                    self.choice_matcher,
-                    file_contents,
-                    chunksize=chunksize)
-        elif self.multiprocessing == 'thread':
-            with ThreadPoolExecutor() as io_executor:
-                results = list(io_executor.map(
-                    self.choice_matcher,
-                    file_contents))
-        else:
-            with ProcessPoolExecutor(max_workers=self.cpu) as cpu_executor:
-                results = list(cpu_executor.map(
-                    self.choice_matcher,
-                    file_contents,
-                    chunksize=chunksize))
-
-        self.add_finding(results)
-        return self.findings
+        results = common.cancellable_map(
+            self.multiprocessing, self.cpu, self.choice_matcher,
+            file_contents, chunksize=chunksize, token=self.token)
+        return self.add_finding(results)
 
     def validate_rules(self):
         """Validate Rules before scanning."""
@@ -168,6 +158,7 @@ class ChoiceMatcher:
 
     def add_finding(self, results):
         """Add Choice Findings and generate metadata."""
+        findings = {}
         for res_list in results:
             if not res_list:
                 continue
@@ -196,4 +187,6 @@ class ChoiceMatcher:
                         'selection',
                         'else'}}}
 
-                self.findings[rule['id']] = meta_dict
+                findings[rule['id']] = meta_dict
+        self.findings = findings
+        return self.findings

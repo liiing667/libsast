@@ -2,6 +2,7 @@
 # -*- coding: utf_8 -*-
 from datetime import datetime
 
+from .common import CancellationToken
 from .core_matcher.pattern_matcher import PatternMatcher
 from .core_matcher.choice_matcher import ChoiceMatcher
 from .core_sgrep.semantic_sgrep import SemanticGrep
@@ -21,6 +22,7 @@ __all__ = [
     'PatternMatcher',
     'SemanticGrep',
     'TreeSitterMatcher',
+    'CancellationToken',
     '__title__',
     '__authors__',
     '__copyright__',

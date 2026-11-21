@@ -3,6 +3,7 @@
 from pathlib import Path
 from fnmatch import fnmatch
 
+from libsast.common import CancellationToken
 from libsast.common import get_worker_count
 from libsast.core_matcher.pattern_matcher import PatternMatcher
 from libsast.core_matcher.choice_matcher import ChoiceMatcher
@@ -56,6 +57,11 @@ class Scanner:
         else:
             self.options['cpu_core'] = get_worker_count()
         self.paths = paths
+        # One cooperative signal is shared by every matcher so a single
+        # cancellation stops the whole scan instead of leaving partial
+        # findings from just one matcher.
+        self.cancel_token = options.get('cancel_token') or CancellationToken()
+        self.options['cancel_token'] = self.cancel_token
 
     def scan(self) -> dict:
         """Start Scan."""
@@ -64,6 +70,10 @@ class Scanner:
 
         if not valid_paths:
             return {}
+        # Freeze one deterministic snapshot for the whole scan. Every matcher
+        # receives the same file range in the same order, and retries cannot
+        # pick up a different (or partially re-counted) file set.
+        valid_paths = sorted(valid_paths, key=lambda p: p.as_posix())
 
         if self.options['match_rules']:
             results['pattern_matcher'] = PatternMatcher(
@@ -79,6 +89,15 @@ class Scanner:
                 self.options).scan(valid_paths)
 
         return results
+
+    def cancel(self):
+        """Request cancellation of the running scan.
+
+        A cancelled scan raises :class:`~libsast.exceptions.ScanCancelledError`
+        rather than returning a report with only some findings, so callers can
+        never mistake an incomplete scan for a complete, clean result.
+        """
+        self.cancel_token.cancel()
 
     def get_scan_files(self):
         """Get files valid for scanning."""

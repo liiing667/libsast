@@ -1,10 +1,6 @@
 # -*- coding: utf_8 -*-
 """Pattern Matcher."""
 from operator import itemgetter
-from concurrent.futures import (
-    ProcessPoolExecutor,
-    ThreadPoolExecutor,
-)
 from functools import lru_cache
 
 from libsast.core_matcher.helpers import (
@@ -28,6 +24,7 @@ class PatternMatcher:
         self.show_progress = options.get('show_progress')
         self.cpu = options.get('cpu_core')
         self.multiprocessing = options.get('multiprocessing')
+        self.token = options.get('cancel_token')
         self.ts_ext_map = options.get('ts_extension_map')
         self.ts_max_match_len = options.get('ts_max_match_length') or 300
         exts = options.get('match_extensions')
@@ -36,9 +33,16 @@ class PatternMatcher:
 
     def scan(self, paths: list) -> dict:
         """Scan file(s) or directory."""
+        # Every scan starts from a clean, deterministically ordered snapshot
+        # so retries never merge with findings from an earlier (cancelled)
+        # attempt and every matcher sees the same file range.
+        self.findings = {}
+        paths = sorted(paths, key=lambda p: p.as_posix())
+        if self.token is not None:
+            self.token.raise_if_cancelled()
         if self.show_progress:
             pbar = common.ProgressBar('Pattern Match', len(paths))
-            paths = pbar.progress_loop(paths)
+            paths = list(pbar.iter_progress(paths, token=self.token))
 
         file_contents = self.read_file_contents(paths)
         return self.regex_scan(file_contents)
@@ -55,10 +59,11 @@ class PatternMatcher:
         if not files_to_scan:
             return []
 
-        with ThreadPoolExecutor() as io_executor:
-            file_contents = list(io_executor.map(
-                self._read_file_content, files_to_scan))
-            return file_contents
+        # Keep the snapshot order stable across matchers and retries.
+        ordered = sorted(files_to_scan, key=lambda p: p.as_posix())
+        return common.cancellable_map(
+            'thread', None, self._read_file_content, ordered,
+            token=self.token)
 
     def regex_scan(self, file_contents: list, rules=None) -> dict:
         """Scan file(s) content."""
@@ -69,30 +74,13 @@ class PatternMatcher:
         self.validate_rules()
 
         chunksize = max(1, len(file_contents) // ((self.cpu or 1) * 4))
-        if self.multiprocessing == 'billiard':
-            from billiard import Pool
-            with Pool(processes=self.cpu) as cpu_executor:
-                results = cpu_executor.map(
-                    self.pattern_matcher,
-                    file_contents,
-                    chunksize=chunksize,
-                )
-        elif self.multiprocessing == 'thread':
-            with ThreadPoolExecutor() as io_executor:
-                results = io_executor.map(
-                    self.pattern_matcher,
-                    file_contents,
-                )
-        else:
-            with ProcessPoolExecutor(max_workers=self.cpu) as cpu_executor:
-                results = cpu_executor.map(
-                    self.pattern_matcher,
-                    file_contents,
-                    chunksize=chunksize,
-                )
+        results = common.cancellable_map(
+            self.multiprocessing, self.cpu, self.pattern_matcher,
+            file_contents, chunksize=chunksize, token=self.token)
 
-        self.add_finding(results)
-        return self.findings
+        # Publish only the complete batch; a cancelled scan raises before
+        # this point and leaves the published findings empty.
+        return self.add_finding(results)
 
     def validate_rules(self):
         """Validate Rules before scanning."""
@@ -189,13 +177,14 @@ class PatternMatcher:
 
     def add_finding(self, results):
         """Add Code Analysis Findings."""
+        findings = {}
         for res_list in results:
             if not res_list:
                 continue
             for match_dict in res_list:
                 rule = match_dict['rule']
                 rule_id = rule['id']
-                files = self.findings.setdefault(
+                files = findings.setdefault(
                     rule_id, {'files': [], 'metadata': {}})['files']
 
                 for match in match_dict['matches']:
@@ -207,12 +196,14 @@ class PatternMatcher:
                     }
                     files.append(file_details)
 
-                if not self.findings[rule_id]['metadata']:
+                if not findings[rule_id]['metadata']:
                     meta = rule.get('metadata', {})
                     meta['description'] = rule['message']
                     meta['severity'] = rule['severity']
-                    self.findings[rule_id]['metadata'] = meta
+                    findings[rule_id]['metadata'] = meta
 
         sort_key = itemgetter('file_path', 'match_string', 'match_lines')
-        for details in self.findings.values():
+        for details in findings.values():
             details['files'].sort(key=sort_key)
+        self.findings = findings
+        return self.findings

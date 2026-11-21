@@ -69,6 +69,12 @@ class RuleProcessingError(LibsastError):
     pass
 
 
+class ScanCancelledError(LibsastError):
+    """Scan was cancelled before every file and rule was processed."""
+
+    pass
+
+
 class MatcherNotFoundError(LibsastError):
     """Pattern Matcher not found."""
 

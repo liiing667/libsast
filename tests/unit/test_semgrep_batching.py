@@ -70,3 +70,38 @@ def test_invoke_bisects_on_e2big(monkeypatch):
     assert report['errors'] == []
     # At least one call must have split (more than one successful run)
     assert len(calls) >= 3
+
+
+def test_failed_oversized_batch_is_not_published_twice(monkeypatch):
+    """A retried E2BIG batch must not leave its paths in the merged report."""
+    scanned_paths = []
+
+    def fake_run(command):
+        paths = command[len([
+            'semgrep', 'scan', '--metrics=off', '--disable-version-check',
+            '--quiet', '--no-rewrite-rule-ids', '--json', '--config', 'r',
+        ]):]
+        if len(paths) > 2:
+            raise OSError(errno.E2BIG, 'Argument list too long')
+        scanned_paths.extend(paths)
+        return {
+            'results': [{'path': p} for p in paths],
+            'errors': [],
+        }
+
+    monkeypatch.setattr(
+        'libsast.core_sgrep.helpers._run_semgrep_command', fake_run)
+
+    base = [
+        'semgrep', 'scan', '--metrics=off', '--disable-version-check',
+        '--quiet', '--no-rewrite-rule-ids', '--json', '--config', 'r',
+    ]
+    paths = [f'f{i}.java' for i in range(7)]
+    report = _invoke_semgrep_batched(base, paths, max_bytes=10 ** 9)
+
+    # Every path is scanned exactly once, even after bisect retries.
+    assert sorted(scanned_paths) == sorted(paths)
+    assert len(scanned_paths) == len(set(scanned_paths)) == len(paths)
+    result_paths = [item['path'] for item in report['results']]
+    assert sorted(result_paths) == sorted(paths)
+    assert len(result_paths) == len(set(result_paths))

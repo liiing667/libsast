@@ -102,13 +102,15 @@ def _invoke_semgrep_batched(base_command, paths, max_bytes=None):
     """Run Semgrep in argv-safe batches; bisect on E2BIG."""
     if max_bytes is None:
         max_bytes = _max_arg_bytes()
+    # Reports are collected locally and published only once at the end. On a
+    # retry (E2BIG bisect or an outer scan retry) the failing batch's report
+    # is discarded, so the same files can never be counted twice.
     reports = []
 
     def run_batch(batch):
         command = base_command + batch
         try:
-            reports.append(_run_semgrep_command(command))
-            return
+            report = _run_semgrep_command(command)
         except OSError as exc:
             if exc.errno not in {errno.E2BIG, 7}:
                 reports.append({'results': [], 'errors': [str(exc)]})
@@ -123,9 +125,13 @@ def _invoke_semgrep_batched(base_command, paths, max_bytes=None):
                     ],
                 })
                 return
+            # Do not append a report for the failed oversized batch: retry
+            # its halves instead so each path appears in exactly one report.
             mid = len(batch) // 2
             run_batch(batch[:mid])
             run_batch(batch[mid:])
+            return
+        reports.append(report)
 
     for batch in batch_paths(base_command, paths, max_bytes):
         run_batch(batch)

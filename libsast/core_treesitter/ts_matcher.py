@@ -1,9 +1,5 @@
 # -*- coding: utf_8 -*-
 """Tree-sitter AST Matcher."""
-from concurrent.futures import (
-    ProcessPoolExecutor,
-    ThreadPoolExecutor,
-)
 from operator import itemgetter
 
 from libsast import (
@@ -92,6 +88,7 @@ class TreeSitterMatcher:
         self.show_progress = options.get('show_progress')
         self.cpu = options.get('cpu_core') or 1
         self.multiprocessing = options.get('multiprocessing')
+        self.token = options.get('cancel_token')
         self.ext_map = options.get('ts_extension_map')
         self.max_size_mb = options.get('ts_max_file_size_mb') or 15
         self.max_match_len = options.get('ts_max_match_length') or 300
@@ -103,9 +100,15 @@ class TreeSitterMatcher:
 
     def scan(self, paths: list) -> dict:
         """Scan file(s) or directory with tree-sitter AST rules."""
+        # Fresh state for every invocation: a retry must not append to the
+        # findings of a previous, possibly cancelled, scan.
+        self.findings = {}
+        paths = sorted(paths, key=lambda p: p.as_posix())
+        if self.token is not None:
+            self.token.raise_if_cancelled()
         if self.show_progress:
             pbar = common.ProgressBar('Tree-sitter Match', len(paths))
-            paths = pbar.progress_loop(paths)
+            paths = list(pbar.iter_progress(paths, token=self.token))
         file_contents = self.read_file_contents(paths)
         return self.ast_scan(file_contents)
 
@@ -119,9 +122,10 @@ class TreeSitterMatcher:
         }
         if not files_to_scan:
             return []
-        with ThreadPoolExecutor() as io_executor:
-            return list(io_executor.map(
-                self._read_file_content, files_to_scan))
+        ordered = sorted(files_to_scan, key=lambda p: p.as_posix())
+        return common.cancellable_map(
+            'thread', None, self._read_file_content, ordered,
+            token=self.token)
 
     def ast_scan(self, file_contents: list, rules=None) -> dict:
         """Scan file(s) content with tree-sitter rules."""
@@ -132,21 +136,10 @@ class TreeSitterMatcher:
         self.validate_rules()
 
         chunksize = max(1, len(file_contents) // ((self.cpu or 1) * 4))
-        if self.multiprocessing == 'billiard':
-            from billiard import Pool
-            with Pool(processes=self.cpu) as cpu_executor:
-                results = cpu_executor.map(
-                    self.ts_matcher, file_contents, chunksize=chunksize)
-        elif self.multiprocessing == 'thread':
-            with ThreadPoolExecutor() as io_executor:
-                results = list(io_executor.map(self.ts_matcher, file_contents))
-        else:
-            with ProcessPoolExecutor(max_workers=self.cpu) as cpu_executor:
-                results = list(cpu_executor.map(
-                    self.ts_matcher, file_contents, chunksize=chunksize))
-
-        self.add_finding(results)
-        return self.findings
+        results = common.cancellable_map(
+            self.multiprocessing, self.cpu, self.ts_matcher,
+            file_contents, chunksize=chunksize, token=self.token)
+        return self.add_finding(results)
 
     def validate_rules(self):
         """Validate tree-sitter rules before scanning."""
@@ -194,13 +187,14 @@ class TreeSitterMatcher:
 
     def add_finding(self, results):
         """Add Code Analysis Findings."""
+        findings = {}
         for res_list in results:
             if not res_list:
                 continue
             for match_dict in res_list:
                 rule = match_dict['rule']
                 rule_id = rule['id']
-                files = self.findings.setdefault(
+                files = findings.setdefault(
                     rule_id, {'files': [], 'metadata': {}})['files']
 
                 for match in match_dict['matches']:
@@ -212,12 +206,14 @@ class TreeSitterMatcher:
                     }
                     files.append(file_details)
 
-                if not self.findings[rule_id]['metadata']:
+                if not findings[rule_id]['metadata']:
                     meta = dict(rule.get('metadata', {}) or {})
                     meta['description'] = rule['message']
                     meta['severity'] = rule['severity']
-                    self.findings[rule_id]['metadata'] = meta
+                    findings[rule_id]['metadata'] = meta
 
         sort_key = itemgetter('file_path', 'match_string', 'match_lines')
-        for details in self.findings.values():
+        for details in findings.values():
             details['files'].sort(key=sort_key)
+        self.findings = findings
+        return self.findings
