@@ -73,3 +73,9 @@ class MatcherNotFoundError(LibsastError):
     """Pattern Matcher not found."""
 
     pass
+
+
+class FileSnapshotError(LibsastError):
+    """A file could not be snapshotted or changed while it was read."""
+
+    pass

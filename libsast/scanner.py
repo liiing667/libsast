@@ -1,9 +1,11 @@
 # -*- coding: utf_8 -*-
 """The libsast Scanner module."""
-from pathlib import Path
+import os
 from fnmatch import fnmatch
+from pathlib import Path
 
 from libsast.common import get_worker_count
+from libsast.file_snapshot import SnapshotRegistry
 from libsast.core_matcher.pattern_matcher import PatternMatcher
 from libsast.core_matcher.choice_matcher import ChoiceMatcher
 from libsast.core_sgrep.semantic_sgrep import SemanticGrep
@@ -56,6 +58,9 @@ class Scanner:
         else:
             self.options['cpu_core'] = get_worker_count()
         self.paths = paths
+        # One registry per scan so every matcher analyses the exact same
+        # version of every file, including when symlinks are re-pointed.
+        self.snapshots = SnapshotRegistry()
 
     def scan(self) -> dict:
         """Start Scan."""
@@ -65,20 +70,60 @@ class Scanner:
         if not valid_paths:
             return {}
 
+        # Snapshot every file once up front. The snapshots bind the content
+        # to a file version; if a file (or symlink target) changes later in
+        # the scan, the registry detects it and the affected file is
+        # explicitly re-read/rescanned with the new content.
+        scan_snapshots = self.snapshots.get_many(valid_paths)
+        if not scan_snapshots:
+            return {}
+
         if self.options['match_rules']:
             results['pattern_matcher'] = PatternMatcher(
-                self.options).scan(valid_paths)
+                self.options).scan(scan_snapshots)
         if self.options['ts_rules']:
             results['treesitter_matcher'] = TreeSitterMatcher(
-                self.options).scan(valid_paths)
+                self.options).scan(scan_snapshots)
         if self.options['choice_rules']:
             results['choice_matcher'] = ChoiceMatcher(
-                self.options).scan(valid_paths)
+                self.options).scan(scan_snapshots)
         if self.options['sgrep_rules']:
             results['semantic_grep'] = SemanticGrep(
                 self.options).scan(valid_paths)
 
+        self._bind_file_versions(results, scan_snapshots)
         return results
+
+    def _bind_file_versions(self, results, snapshots):
+        """Attach the file version each finding was produced from.
+
+        Persisting this fingerprint alongside the findings lets the next
+        run tell whether an on-disk file still matches the scanned
+        version: a different fingerprint means the old findings are stale
+        and the file must be rescanned.
+        """
+        versions = {
+            snapshot.path.as_posix(): snapshot.version.as_dict()
+            for snapshot in snapshots
+        }
+        self._annotate(results, versions)
+
+    def _annotate(self, node, versions):
+        """Walk arbitrary finding structures and tag file entries."""
+        if isinstance(node, dict):
+            files = node.get('files')
+            if isinstance(files, list):
+                for file_details in files:
+                    if not isinstance(file_details, dict):
+                        continue
+                    version = versions.get(file_details.get('file_path'))
+                    if version is not None:
+                        file_details['file_version'] = dict(version)
+            for value in node.values():
+                self._annotate(value, versions)
+        elif isinstance(node, list):
+            for item in node:
+                self._annotate(item, versions)
 
     def get_scan_files(self):
         """Get files valid for scanning."""
@@ -89,21 +134,44 @@ class Scanner:
         for path in self.paths:
             pobj = Path(path)
             if pobj.is_dir():
-                all_files.update({
-                    pfile
-                    for pfile in pobj.rglob('*')
-                    if self.validate_file(pfile)
-                })
+                self._collect_files(pobj, all_files)
             elif pobj.is_file() and self.validate_file(pobj):
                 all_files.add(pobj)
 
         return all_files
 
+    def _collect_files(self, root, all_files):
+        """Walk ``root`` without following symlinked directories.
+
+        Symlinked files inside the tree are still collected (their target
+        is resolved safely in the snapshot layer), but a symlinked
+        directory is never traversed so a scan cannot silently leave the
+        requested root or loop forever on a directory cycle.
+        """
+        for dirpath, dirnames, filenames in os.walk(root):
+            current = Path(dirpath)
+            # Drop symlinked sub-directories in place so os.walk does not
+            # descend into them.
+            dirnames[:] = [
+                name for name in dirnames
+                if not (current / name).is_symlink()
+            ]
+            for name in filenames:
+                candidate = current / name
+                if self.validate_file(candidate):
+                    all_files.add(candidate)
+
     def validate_file(self, path):
         """Check if we should scan the file."""
-        # Early exit if the path is not a file or does not exist.
-        # Symlinks are skipped: one in the scanned tree can point outside it.
-        if path.is_symlink() or not path.exists() or not path.is_file():
+        # Early exit if the path does not exist or is not a regular file.
+        # Valid symlinks are followed (their target is resolved by the
+        # snapshot layer); only broken links, symlink loops and non-file
+        # targets are rejected.
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return False
+        if not resolved.is_file():
             return False
 
         # Validate against ignore conditions

@@ -6,6 +6,15 @@ from .core_matcher.pattern_matcher import PatternMatcher
 from .core_matcher.choice_matcher import ChoiceMatcher
 from .core_sgrep.semantic_sgrep import SemanticGrep
 from .core_treesitter.ts_matcher import TreeSitterMatcher
+from .exceptions import FileSnapshotError
+from .file_snapshot import (
+    FileSnapshot,
+    FileVersion,
+    SnapshotRegistry,
+    create_snapshot,
+    get_file_version,
+    is_finding_current,
+)
 from .scanner import Scanner
 
 
@@ -21,6 +30,13 @@ __all__ = [
     'PatternMatcher',
     'SemanticGrep',
     'TreeSitterMatcher',
+    'FileSnapshot',
+    'FileSnapshotError',
+    'FileVersion',
+    'SnapshotRegistry',
+    'create_snapshot',
+    'get_file_version',
+    'is_finding_current',
     '__title__',
     '__authors__',
     '__copyright__',

@@ -24,6 +24,7 @@ from libsast.core_treesitter.matchers import (
     parse_tree,
     rule_supports_language,
 )
+from libsast.file_snapshot import FileSnapshot, create_snapshot
 
 
 def _prepare_source_bytes(data, is_embedded):
@@ -110,18 +111,39 @@ class TreeSitterMatcher:
         return self.ast_scan(file_contents)
 
     def read_file_contents(self, paths: list) -> list:
-        """Load file(s) content."""
+        """Load file(s) content as versioned (path, data) pairs.
+
+        Accepts :class:`~libsast.file_snapshot.FileSnapshot` objects from
+        the scanner or plain :class:`~pathlib.Path` objects. Snapshots are
+        shared with the regex matcher so both always see the same file
+        version.
+        """
         if not paths:
             return []
+        snapshots = self._as_snapshots(paths)
         files_to_scan = {
-            sfile for sfile in paths
-            if is_file_valid(sfile, self.exts, self.max_size_mb)
+            snapshot for snapshot in snapshots
+            if is_file_valid(snapshot.path, self.exts, self.max_size_mb)
         }
         if not files_to_scan:
             return []
         with ThreadPoolExecutor() as io_executor:
             return list(io_executor.map(
                 self._read_file_content, files_to_scan))
+
+    @staticmethod
+    def _as_snapshots(paths):
+        """Normalise Path/snapshot inputs into FileSnapshot objects."""
+        snapshots = []
+        for item in paths:
+            if isinstance(item, FileSnapshot):
+                snapshots.append(item)
+            else:
+                try:
+                    snapshots.append(create_snapshot(item))
+                except Exception:
+                    continue
+        return snapshots
 
     def ast_scan(self, file_contents: list, rules=None) -> dict:
         """Scan file(s) content with tree-sitter rules."""
@@ -168,13 +190,9 @@ class TreeSitterMatcher:
                     f' Available matchers are {supported}.')
 
     @staticmethod
-    def _read_file_content(file_path):
-        """Read file content with encoding handling."""
-        try:
-            return file_path, file_path.read_text('utf-8', 'ignore')
-        except Exception as e:
-            print(f'Error reading {file_path}: {e}')
-            return file_path, ''
+    def _read_file_content(snapshot):
+        """Return the (path, content) pair captured in a snapshot."""
+        return snapshot.path, snapshot.data
 
     def ts_matcher(self, file_data):
         """Run tree-sitter rules against one file."""

@@ -12,6 +12,7 @@ from libsast.core_matcher.helpers import (
     is_file_valid,
     strip_comments,
 )
+from libsast.file_snapshot import FileSnapshot, create_snapshot
 from libsast.core_matcher.matchers import get_compiled_pattern
 from libsast import (
     common,
@@ -40,50 +41,79 @@ class ChoiceMatcher:
         return self.regex_scan(file_contents)
 
     def _load_formatted_paths(self, unique_paths):
-        """Read and format all unique candidate paths in parallel."""
+        """Read and format all unique candidate snapshots in parallel."""
         path_list = list(unique_paths)
         with ThreadPoolExecutor() as io_executor:
             formatted_list = list(io_executor.map(
                 self._read_formatted_path, path_list))
         return {
-            p: d for p, d in zip(path_list, formatted_list) if d is not None
+            snapshot.path: d
+            for snapshot, d in zip(path_list, formatted_list)
+            if d is not None
         }
 
     def read_file_contents(self, paths: list) -> list:
-        """Load file(s) content once and pair with each choice rule."""
+        """Load snapshot content once and pair it with each choice rule.
+
+        Accepts :class:`~libsast.file_snapshot.FileSnapshot` objects from
+        the scanner or plain :class:`~pathlib.Path` objects.
+        """
         if not paths or not self.scan_rules:
             return []
 
+        snapshots = self._as_snapshots(paths)
         alt_path = Path(self.alternative_path) if self.alternative_path else None
+        alt_snapshot = None
+        if alt_path is not None:
+            try:
+                alt_snapshot = create_snapshot(alt_path)
+            except Exception:
+                alt_snapshot = None
         rule_paths = []
         unique_paths = set()
         for rule in self.scan_rules:
-            scan_paths = [alt_path] if (
-                rule['type'] != 'code' and alt_path) else paths
+            if rule['type'] != 'code' and alt_snapshot is not None:
+                scan_paths = [alt_snapshot]
+            else:
+                scan_paths = snapshots
             rule_paths.append((scan_paths, rule))
             unique_paths.update(scan_paths)
 
         path_to_data = self._load_formatted_paths(unique_paths)
         return [
             [
-                (path_to_data[p], rule)
-                for p in scan_paths
-                if p in path_to_data
+                (path_to_data[snapshot.path], rule)
+                for snapshot in scan_paths
+                if snapshot.path in path_to_data
             ]
             for scan_paths, rule in rule_paths
         ]
 
-    def _read_formatted_path(self, sfile):
-        """Read and strip comments for a single file once."""
-        if not is_file_valid(sfile, self.exts, 5):
+    @staticmethod
+    def _as_snapshots(paths):
+        """Normalise Path/snapshot inputs into FileSnapshot objects."""
+        snapshots = []
+        for item in paths:
+            if isinstance(item, FileSnapshot):
+                snapshots.append(item)
+            else:
+                try:
+                    snapshots.append(create_snapshot(item))
+                except Exception:
+                    continue
+        return snapshots
+
+    def _read_formatted_path(self, snapshot):
+        """Strip comments from the content captured in one snapshot."""
+        if not is_file_valid(snapshot.path, self.exts, 5):
             return None
         try:
             return self._format_content(
-                sfile.read_text('utf-8', 'ignore'),
-                sfile.suffix.lower())
+                snapshot.data,
+                snapshot.path.suffix.lower())
         except Exception as e:
             raise exceptions.RuleProcessingError(
-                f'Error reading file: {sfile}') from e
+                f'Error reading file: {snapshot.path}') from e
 
     def regex_scan(self, file_contents: list, rules=None) -> dict:
         """Process regex matches on the file contents."""

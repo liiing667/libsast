@@ -19,6 +19,7 @@ from libsast import (
     common,
     exceptions,
 )
+from libsast.file_snapshot import FileSnapshot, create_snapshot
 
 
 class PatternMatcher:
@@ -44,13 +45,19 @@ class PatternMatcher:
         return self.regex_scan(file_contents)
 
     def read_file_contents(self, paths: list) -> list:
-        """Load file(s) content."""
+        """Load file(s) content as versioned (path, data) pairs.
+
+        ``paths`` may be :class:`~libsast.file_snapshot.FileSnapshot`
+        objects produced by the scanner (shared with every other matcher)
+        or plain :class:`~pathlib.Path` objects for standalone use.
+        """
         if not paths:
             return []
 
+        snapshots = self._as_snapshots(paths)
         files_to_scan = {
-            sfile for sfile in paths
-            if is_file_valid(sfile, self.exts, 5)
+            snapshot for snapshot in snapshots
+            if is_file_valid(snapshot.path, self.exts, 5)
         }
         if not files_to_scan:
             return []
@@ -59,6 +66,22 @@ class PatternMatcher:
             file_contents = list(io_executor.map(
                 self._read_file_content, files_to_scan))
             return file_contents
+
+    @staticmethod
+    def _as_snapshots(paths):
+        """Normalise Path/snapshot inputs into FileSnapshot objects."""
+        snapshots = []
+        for item in paths:
+            if isinstance(item, FileSnapshot):
+                snapshots.append(item)
+            else:
+                try:
+                    snapshots.append(create_snapshot(item))
+                except Exception:
+                    # Unreadable entries are skipped, matching the old
+                    # behaviour of returning an empty string on read errors.
+                    continue
+        return snapshots
 
     def regex_scan(self, file_contents: list, rules=None) -> dict:
         """Scan file(s) content."""
@@ -119,13 +142,9 @@ class PatternMatcher:
                     f' Available matchers are {supported}.')
 
     @staticmethod
-    def _read_file_content(file_path):
-        """Read file content with encoding handling."""
-        try:
-            return file_path, file_path.read_text('utf-8', 'ignore')
-        except Exception as e:
-            print(f'Error reading {file_path}: {e}')
-            return file_path, ''
+    def _read_file_content(snapshot):
+        """Return the (path, content) pair captured in a snapshot."""
+        return snapshot.path, snapshot.data
 
     def _match_regex_rules(self, file_path, data, regex_rules):
         """Run regex rules against formatted file content."""
