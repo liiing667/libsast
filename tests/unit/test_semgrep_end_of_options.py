@@ -17,7 +17,7 @@ OPTION_NAME = '--output=pwned.py'
 def test_paths_follow_end_of_options(monkeypatch):
     commands = []
 
-    def fake_run(command):
+    def fake_run(command, timeout=None):
         commands.append(list(command))
         return {'results': [], 'errors': []}
 

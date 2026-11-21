@@ -10,6 +10,13 @@ from pathlib import Path
 # Semgrep CE redacts some JSON fields unless logged into Semgrep App.
 _REDACTED = 'requires login'
 
+# Env var (in seconds) capping a single Semgrep batch run; unset = no limit.
+_TIMEOUT_ENV = 'LIBSAST_SGREP_TIMEOUT'
+
+
+class SemgrepTransportError(Exception):
+    """A Semgrep batch did not return a usable report at all."""
+
 
 def _max_arg_bytes():
     """Conservative argv budget so we stay under OS ARG_MAX."""
@@ -59,83 +66,138 @@ def merge_semgrep_reports(reports):
             continue
         merged['results'].extend(report.get('results') or [])
         errors = report.get('errors')
-        if not errors:
-            continue
-        if isinstance(errors, list):
-            merged['errors'].extend(errors)
-        else:
-            merged['errors'].append(errors)
+        if errors:
+            if isinstance(errors, list):
+                merged['errors'].extend(errors)
+            else:
+                merged['errors'].append(errors)
+        failed = report.get('failed_batches')
+        if failed:
+            merged.setdefault('failed_batches', []).extend(failed)
     return merged
 
 
-def _run_semgrep_command(command):
-    """Run one Semgrep command and return parsed JSON or an error report."""
+def _run_semgrep_command(command, timeout=None):
+    """Run one Semgrep command and return the parsed JSON report.
+
+    Raises SemgrepTransportError when the batch did not return a usable
+    report (missing binary, timeout, empty or invalid output). An E2BIG
+    OSError still propagates so the caller can bisect the batch.
+    """
     try:
         result = subprocess.run(
             command,
             capture_output=True,
             text=True,
             check=False,
+            timeout=timeout,
         )
-    except FileNotFoundError:
-        return {
-            'results': [],
-            'errors': ['semgrep not found. Install with: pip install semgrep'],
-        }
+    except FileNotFoundError as exc:
+        raise SemgrepTransportError(
+            'semgrep not found. Install with: pip install semgrep') from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SemgrepTransportError(
+            f'semgrep timed out after {exc.timeout}s') from exc
     except OSError as exc:
         # Errno 7 / E2BIG: Argument list too long
         if exc.errno in {errno.E2BIG, 7}:
             raise
-        return {'results': [], 'errors': [str(exc)]}
+        raise SemgrepTransportError(str(exc)) from exc
 
     raw = result.stdout or ''
     if not raw:
         err = (result.stderr or '').strip()
-        return {'results': [], 'errors': [err] if err else []}
+        raise SemgrepTransportError(
+            err or f'semgrep exited with code {result.returncode}'
+            ' and produced no output')
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
-        return {'results': [], 'errors': [str(exc)]}
+        raise SemgrepTransportError(
+            f'invalid semgrep JSON output: {exc}') from exc
 
 
-def _invoke_semgrep_batched(base_command, paths, max_bytes=None):
-    """Run Semgrep in argv-safe batches; bisect on E2BIG."""
+def _invoke_semgrep_batched(base_command, paths, max_bytes=None, timeout=None):
+    """Run Semgrep in argv-safe batches; bisect on E2BIG.
+
+    The batch plan is deterministic: paths are sorted before splitting,
+    so the same set of files always maps to the same batch numbers across
+    runs and a retry reproduces the exact same plan. Batches that do not
+    return a usable report are recorded under 'failed_batches' (with the
+    files they covered) instead of being silently merged as clean.
+    """
     if max_bytes is None:
         max_bytes = _max_arg_bytes()
     reports = []
+    failed_batches = []
+    batches = batch_paths(base_command, sorted(paths), max_bytes)
+    total = len(batches)
 
-    def run_batch(batch):
+    def record_failure(batch, index, error):
+        failed_batches.append({
+            'batch': index,
+            'batches': total,
+            'paths': list(batch),
+            'error': error,
+        })
+
+    def run_batch(batch, index):
         command = base_command + batch
         try:
-            reports.append(_run_semgrep_command(command))
+            reports.append(_run_semgrep_command(command, timeout=timeout))
+            return
+        except SemgrepTransportError as exc:
+            record_failure(batch, index, str(exc))
             return
         except OSError as exc:
             if exc.errno not in {errno.E2BIG, 7}:
-                reports.append({'results': [], 'errors': [str(exc)]})
+                record_failure(batch, index, str(exc))
                 return
             if len(batch) <= 1:
                 path = batch[0] if batch else ''
-                reports.append({
-                    'results': [],
-                    'errors': [
-                        'Argument list too long when invoking semgrep'
-                        f' on path: {path}',
-                    ],
-                })
+                record_failure(
+                    batch,
+                    index,
+                    'Argument list too long when invoking semgrep'
+                    f' on path: {path}',
+                )
                 return
             mid = len(batch) // 2
-            run_batch(batch[:mid])
-            run_batch(batch[mid:])
+            run_batch(batch[:mid], index)
+            run_batch(batch[mid:], index)
 
-    for batch in batch_paths(base_command, paths, max_bytes):
-        run_batch(batch)
-    return merge_semgrep_reports(reports)
+    for index, batch in enumerate(batches):
+        run_batch(batch, index)
+    merged = merge_semgrep_reports(reports)
+    if failed_batches:
+        merged['failed_batches'] = failed_batches
+        for failed in failed_batches:
+            files = ', '.join(failed['paths'])
+            merged['errors'].append(
+                f"Semgrep batch {failed['batch'] + 1}/{failed['batches']}"
+                f' did not return results ({failed["error"]});'
+                f" {len(failed['paths'])} file(s) not scanned: {files}")
+    return merged
 
 
-def invoke_semgrep(paths, scan_rules):
+def _timeout_from_env():
+    """Read optional per-batch Semgrep timeout (seconds) from the env."""
+    raw = os.environ.get(_TIMEOUT_ENV)
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def invoke_semgrep(paths, scan_rules, timeout=None):
     """Call Semgrep and return the parsed JSON report."""
     if platform.system() == 'Windows':
         return None
+    if timeout is None:
+        timeout = _timeout_from_env()
     ps = [pt.as_posix() for pt in paths]
     base_command = [
         'semgrep',
@@ -151,7 +213,7 @@ def invoke_semgrep(paths, scan_rules):
         # still be read as a path.
         '--',
     ]
-    return _invoke_semgrep_batched(base_command, ps)
+    return _invoke_semgrep_batched(base_command, ps, timeout=timeout)
 
 
 def get_match_string(path, start_line, end_line, fallback=''):

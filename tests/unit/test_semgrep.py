@@ -1,9 +1,18 @@
 """Unit Tests - test semantic grep patterns."""
+import platform
+import shutil
+
+import pytest
+
 from .setup_test import scanner
 
 from libsast import (
     standards,
 )
+
+pytestmark = pytest.mark.skipif(
+    platform.system() == 'Windows' or not shutil.which('semgrep'),
+    reason='Semgrep not available')
 
 
 def test_semgrep():

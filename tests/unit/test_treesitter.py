@@ -12,6 +12,19 @@ TS_RULES_FILE = ASSETS_DIR / 'rules' / 'treesitter_matcher' / 'ts_rules.yaml'
 INVALID_TS_LANG_FILE = ASSETS_DIR / 'invalid' / 'invalid_ts_lang.yaml'
 
 
+def _has_tree_sitter():
+    try:
+        import tree_sitter  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+requires_tree_sitter = pytest.mark.skipif(
+    not _has_tree_sitter(), reason='tree-sitter is not installed')
+
+
+@requires_tree_sitter
 def test_treesitter_tsx_and_dev_guard_and_not_within():
     tsx_file = TS_FILES_DIR / 'App.tsx'
     res = Scanner(
@@ -33,6 +46,7 @@ def test_treesitter_tsx_and_dev_guard_and_not_within():
     assert wv_matches[0]['match_lines'] == (9, 12)
 
 
+@requires_tree_sitter
 def test_treesitter_minified_bundle_and_html_script():
     bundle = TS_FILES_DIR / 'index.android.bundle'
     html = TS_FILES_DIR / 'index.html'
@@ -49,6 +63,7 @@ def test_treesitter_minified_bundle_and_html_script():
     assert res['ts_eval_call']['files'][0]['match_lines'] == (3, 3)
 
 
+@requires_tree_sitter
 def test_treesitter_resolves_intra_file_constants():
     ts_file = TS_FILES_DIR / 'storage.ts'
     res = Scanner(

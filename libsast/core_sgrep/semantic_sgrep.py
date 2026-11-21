@@ -45,6 +45,11 @@ class SemanticGrep:
         errs = results.get('errors')
         if errs:
             self.findings['errors'] = errs
+        failed = results.get('failed_batches')
+        if failed:
+            # Batches that never returned must stay visible: their files
+            # were not scanned and must not be reported as clean.
+            self.findings.setdefault('failed_batches', []).extend(failed)
         if not results.get('results'):
             return
         smatches = self.findings['matches']

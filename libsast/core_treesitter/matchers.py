@@ -4,13 +4,20 @@ from abc import ABC, abstractmethod
 from bisect import bisect_right
 from functools import lru_cache
 
-from tree_sitter import Parser, Query
-try:
-    from tree_sitter import QueryCursor
-except ImportError:  # pragma: no cover
-    QueryCursor = None
-
+from libsast import exceptions
 from libsast.core_treesitter.languages import get_language
+
+
+def _tree_sitter():
+    """Import tree_sitter lazily so libsast is importable without it."""
+    try:
+        import tree_sitter
+    except ImportError as exc:
+        raise exceptions.MatcherNotFoundError(
+            'tree-sitter is not installed. Install it with:'
+            ' pip install tree-sitter') from exc
+    return tree_sitter
+
 
 _IDENTIFIER_TYPES = {
     'identifier',
@@ -69,13 +76,13 @@ def get_compiled_query(lang_name, pattern):
     text = str(pattern).strip()
     if '@match' not in text:
         text = f'{text} @match'
-    return Query(lang, text)
+    return _tree_sitter().Query(lang, text)
 
 
 def parse_tree(lang_name, source_bytes):
     """Parse source bytes into a tree-sitter Tree."""
     lang = get_language(lang_name)
-    parser = Parser(lang)
+    parser = _tree_sitter().Parser(lang)
     return parser.parse(source_bytes)
 
 
@@ -268,8 +275,9 @@ def _map_to_original_byte(inlined_byte, shifts, is_end=False):
 
 def _query_matches(query, node):
     """Execute a Query against a Node across tree-sitter 0.22-0.26+."""
-    if QueryCursor is not None:
-        return QueryCursor(query).matches(node)
+    cursor = getattr(_tree_sitter(), 'QueryCursor', None)
+    if cursor is not None:
+        return cursor(query).matches(node)
     return query.matches(node)
 
 

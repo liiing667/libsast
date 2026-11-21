@@ -3,8 +3,6 @@
 from functools import lru_cache
 import importlib
 
-from tree_sitter import Language
-
 from libsast import exceptions
 
 DEFAULT_EXTENSION_MAP = {
@@ -56,6 +54,7 @@ _MODULE_OVERRIDE = {
 
 def _wrap_language(obj):
     """Wrap a PyCapsule or Language into a tree_sitter.Language instance."""
+    from tree_sitter import Language
     if isinstance(obj, Language):
         return obj
     return Language(obj)
