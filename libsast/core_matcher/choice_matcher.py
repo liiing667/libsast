@@ -13,6 +13,11 @@ from libsast.core_matcher.helpers import (
     strip_comments,
 )
 from libsast.core_matcher.matchers import get_compiled_pattern
+from libsast.rulepack import (
+    attach_rulepack_evidence,
+    coerce_rulepack,
+    RuleSet,
+)
 from libsast import (
     common,
     exceptions,
@@ -20,21 +25,54 @@ from libsast import (
 
 
 class ChoiceMatcher:
-    def __init__(self, options: dict) -> None:
-        self.scan_rules = get_rules(options.get('choice_rules'))
+    def __init__(self, options: dict, rulepack=None) -> None:
+        snapshot = rulepack or options.get('choice_rulepack')
+        if snapshot is None and not options.get('choice_rules'):
+            snapshot = options.get('rulepack')
+        if snapshot is not None:
+            snapshot = coerce_rulepack(snapshot, allow_stale=False)
+            self.rulepack = snapshot
+            self.scan_rules = RuleSet(snapshot.rules, snapshot)
+        else:
+            rules = get_rules(options.get('choice_rules'))
+            self.rulepack = getattr(rules, 'rulepack', None)
+            self.scan_rules = rules
         self.show_progress = options.get('show_progress')
         self.cpu = options.get('cpu_core')
         self.multiprocessing = options.get('multiprocessing')
+        self.scan_generation = options.get('scan_generation')
         self.alternative_path = options.get('alternative_path')
         exts = options.get('choice_extensions')
         self.exts = [ext.lower() for ext in exts] if exts else []
         self.findings = {}
 
+    @property
+    def rule_source(self):
+        """Rule source used by this matcher."""
+        return self.rulepack.source if self.rulepack else None
+
+    @property
+    def rules_version(self):
+        """Rule version used by this matcher."""
+        return self.rulepack.version if self.rulepack else None
+
+    @property
+    def rulepack_id(self):
+        """Rulepack identity used by this matcher."""
+        return self.rulepack.identity if self.rulepack else None
+
+    @property
+    def rule_generation(self):
+        """Rulepack generation used by this matcher."""
+        return self.rulepack.generation if self.rulepack else None
+
     def scan(self, paths: list) -> dict:
         """Scan file(s) or directory per rule."""
-        if self.show_progress:
+        self.findings = {}
+        if self.show_progress and self.scan_rules:
             pbar = common.ProgressBar('Choice Match', len(self.scan_rules))
-            self.scan_rules = pbar.progress_loop(self.scan_rules)
+            self.scan_rules = list(
+                pbar.progress_loop(self.scan_rules))
 
         file_contents = self.read_file_contents(paths)
         return self.regex_scan(file_contents)
@@ -87,8 +125,11 @@ class ChoiceMatcher:
 
     def regex_scan(self, file_contents: list, rules=None) -> dict:
         """Process regex matches on the file contents."""
-        if rules:
-            self.scan_rules = get_rules(rules)
+        if rules is not None:
+            # Explicit matcher-level override, frozen once for this call.
+            snapshot = coerce_rulepack(rules, allow_stale=False)
+            self.rulepack = snapshot
+            self.scan_rules = RuleSet(snapshot.rules, snapshot)
         if not (self.scan_rules and file_contents):
             return {}
         self.validate_rules()
@@ -196,4 +237,9 @@ class ChoiceMatcher:
                         'selection',
                         'else'}}}
 
+                attach_rulepack_evidence(
+                    meta_dict,
+                    self.rulepack,
+                    rule_id=rule['id'],
+                    scan_generation=self.scan_generation)
                 self.findings[rule['id']] = meta_dict

@@ -73,3 +73,53 @@ class MatcherNotFoundError(LibsastError):
     """Pattern Matcher not found."""
 
     pass
+
+
+class RulePackError(LibsastError):
+    """Base class for immutable rulepack snapshot failures."""
+
+    pass
+
+
+class RulePackIntegrityError(RulePackError):
+    """A rulepack manifest does not match the files on disk."""
+
+    pass
+
+
+class RulePackChangedError(RulePackError):
+    """A rulepack changed while it was being read into a snapshot."""
+
+    pass
+
+
+class RulePackGenerationError(RulePackError):
+    """Reports from different rulepack generations cannot be mixed."""
+
+    pass
+
+
+class RulePackVersionError(RulePackError):
+    """A rulepack version or identity could not be resolved."""
+
+    pass
+
+
+class StaleRulePackError(RulePackError):
+    """A complete rulepack snapshot is not available."""
+
+    pass
+
+
+# Compatibility spellings used by consumers.
+RulepackError = RulePackError
+RulepackIntegrityError = RulePackIntegrityError
+RulepackChangedError = RulePackChangedError
+RulepackGenerationError = RulePackGenerationError
+RulepackVersionError = RulePackVersionError
+RulePackMismatchError = RulePackGenerationError
+RuleSetGenerationError = RulePackGenerationError
+RulePackStaleError = StaleRulePackError
+RulePackRefreshError = RulePackChangedError
+RulepackRefreshError = RulePackChangedError
+RuleSetMismatchError = RulePackGenerationError

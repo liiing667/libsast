@@ -15,6 +15,11 @@ from libsast.core_matcher.helpers import (
 from libsast.core_matcher import matchers
 from libsast.core_treesitter.matchers import TS_MATCHERS
 from libsast.core_treesitter.ts_matcher import match_ts_rules_on_file
+from libsast.rulepack import (
+    attach_rulepack_evidence,
+    coerce_rulepack,
+    RuleSet,
+)
 from libsast import (
     common,
     exceptions,
@@ -22,23 +27,58 @@ from libsast import (
 
 
 class PatternMatcher:
-    def __init__(self, options: dict) -> None:
+    def __init__(self, options: dict, rulepack=None) -> None:
         self.matcher = matchers.MatchCommand()
-        self.scan_rules = get_rules(options.get('match_rules'))
+        snapshot = rulepack or options.get('match_rulepack')
+        if snapshot is None and not options.get('match_rules'):
+            snapshot = options.get('rulepack')
+        if snapshot is not None:
+            snapshot = coerce_rulepack(snapshot, allow_stale=False)
+            self.rulepack = snapshot
+            self.scan_rules = RuleSet(snapshot.rules, snapshot)
+        else:
+            rules = get_rules(options.get('match_rules'))
+            self.rulepack = getattr(rules, 'rulepack', None)
+            self.scan_rules = rules
         self.show_progress = options.get('show_progress')
         self.cpu = options.get('cpu_core')
         self.multiprocessing = options.get('multiprocessing')
+        self.scan_generation = options.get('scan_generation')
         self.ts_ext_map = options.get('ts_extension_map')
         self.ts_max_match_len = options.get('ts_max_match_length') or 300
         exts = options.get('match_extensions')
         self.exts = [ext.lower() for ext in exts] if exts else []
         self.findings = {}
 
+    @property
+    def rule_source(self):
+        """Rule source used by this matcher."""
+        return self.rulepack.source if self.rulepack else None
+
+    @property
+    def rules_version(self):
+        """Rule version used by this matcher."""
+        return self.rulepack.version if self.rulepack else None
+
+    @property
+    def rulepack_id(self):
+        """Rulepack identity used by this matcher."""
+        return self.rulepack.identity if self.rulepack else None
+
+    @property
+    def rule_generation(self):
+        """Rulepack generation used by this matcher."""
+        return self.rulepack.generation if self.rulepack else None
+
     def scan(self, paths: list) -> dict:
         """Scan file(s) or directory."""
+        self.findings = {}
         if self.show_progress:
             pbar = common.ProgressBar('Pattern Match', len(paths))
             paths = pbar.progress_loop(paths)
+            if self.scan_rules is not None:
+                self.scan_rules = list(
+                    pbar.progress_loop(self.scan_rules))
 
         file_contents = self.read_file_contents(paths)
         return self.regex_scan(file_contents)
@@ -62,8 +102,12 @@ class PatternMatcher:
 
     def regex_scan(self, file_contents: list, rules=None) -> dict:
         """Scan file(s) content."""
-        if rules:
-            self.scan_rules = get_rules(rules)
+        if rules is not None:
+            # Explicit matcher-level override: freeze it before any worker
+            # starts so files in this call cannot observe another version.
+            snapshot = coerce_rulepack(rules, allow_stale=False)
+            self.rulepack = snapshot
+            self.scan_rules = RuleSet(snapshot.rules, snapshot)
         if not (self.scan_rules and file_contents):
             return {}
         self.validate_rules()
@@ -208,10 +252,19 @@ class PatternMatcher:
                     files.append(file_details)
 
                 if not self.findings[rule_id]['metadata']:
-                    meta = rule.get('metadata', {})
+                    # Copy before adding report-only keys: the rulepack is a
+                    # shared immutable snapshot and must not be mutated by a
+                    # scan.
+                    meta = dict(rule.get('metadata', {}) or {})
                     meta['description'] = rule['message']
                     meta['severity'] = rule['severity']
                     self.findings[rule_id]['metadata'] = meta
+
+                attach_rulepack_evidence(
+                    self.findings[rule_id],
+                    self.rulepack,
+                    rule_id=rule_id,
+                    scan_generation=self.scan_generation)
 
         sort_key = itemgetter('file_path', 'match_string', 'match_lines')
         for details in self.findings.values():

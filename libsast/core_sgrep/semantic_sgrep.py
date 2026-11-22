@@ -1,6 +1,15 @@
 # -*- coding: utf_8 -*-
 """Semantic Grep Core."""
-from libsast.core_sgrep.helpers import get_match_string, invoke_semgrep
+from libsast.core_sgrep.helpers import (
+    _report_generation,
+    get_match_string,
+    invoke_semgrep,
+)
+from libsast.rulepack import (
+    attach_rulepack_evidence,
+    coerce_rulepack,
+)
+from libsast.exceptions import RulePackGenerationError
 from libsast import (
     common,
     standards,
@@ -8,9 +17,19 @@ from libsast import (
 
 
 class SemanticGrep:
-    def __init__(self, options: dict) -> None:
+    def __init__(self, options: dict, rulepack=None) -> None:
         self.scan_rules = options.get('sgrep_rules')
         self.show_progress = options.get('show_progress')
+        self.scan_generation = options.get('scan_generation')
+        snapshot = (
+            rulepack
+            or options.get('sgrep_rulepack')
+        )
+        if snapshot is not None:
+            self.rulepack = coerce_rulepack(
+                snapshot, raw=True, allow_stale=False)
+        else:
+            self.rulepack = None
         exts = options.get('sgrep_extensions')
         if exts:
             self.exts = [ext.lower() for ext in exts]
@@ -22,19 +41,65 @@ class SemanticGrep:
         }
         self.standards = standards.get_standards()
 
+    @property
+    def rule_source(self):
+        """Rule source used by this matcher."""
+        return self.rulepack.source if self.rulepack else self.scan_rules
+
+    @property
+    def rules_version(self):
+        """Rule version used by this matcher."""
+        return self.rulepack.version if self.rulepack else None
+
+    @property
+    def rulepack_id(self):
+        """Rulepack identity used by this matcher."""
+        return self.rulepack.identity if self.rulepack else None
+
+    @property
+    def rule_generation(self):
+        """Rulepack generation used by this matcher."""
+        return self.rulepack.generation if self.rulepack else None
+
+    def semgrep_config(self):
+        """Return the frozen config path when a snapshot is attached."""
+        if self.rulepack is not None:
+            return self.rulepack.materialize()
+        return self.scan_rules
+
     def scan(self, paths: list) -> dict:
         """Do sgrep scan."""
+        self.findings = {
+            'matches': {},
+            'errors': [],
+        }
         if self.exts:
             paths = [sfile for sfile in paths if sfile.suffix.lower() in self.exts]
             if not paths:
                 return self.findings
+        config = self.semgrep_config()
         if self.show_progress:
             pbar = common.ProgressBar('Semantic Grep', len(paths))
             sgrep_out = pbar.progress_function(
                 invoke_semgrep,
-                (paths, self.scan_rules))
+                (paths, config))
         else:
-            sgrep_out = invoke_semgrep(paths, self.scan_rules)
+            sgrep_out = invoke_semgrep(paths, config)
+        if isinstance(sgrep_out, dict):
+            reported = _report_generation(sgrep_out)
+            expected = {
+                str(value) for value in (
+                    self.scan_generation,
+                    self.rulepack.generation if self.rulepack else None,
+                    self.rulepack.version if self.rulepack else None,
+                    self.rulepack.identity if self.rulepack else None,
+                )
+                if value
+            }
+            if reported and expected and str(reported) not in expected:
+                raise RulePackGenerationError(
+                    'Semgrep report generation does not match the frozen '
+                    f'rulepack: {reported} not in {sorted(expected)}')
         self.format_output(sgrep_out)
         return self.findings
 
@@ -74,6 +139,11 @@ class SemanticGrep:
                     'files': [file_details],
                     'metadata': metadata,
                 }
+                attach_rulepack_evidence(
+                    smatches[rule_id],
+                    self.rulepack,
+                    rule_id=rule_id,
+                    scan_generation=self.scan_generation)
                 self.expand_mappings(smatches[rule_id])
 
     def expand_mappings(self, meta):

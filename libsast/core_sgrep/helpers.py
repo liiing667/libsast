@@ -7,6 +7,8 @@ import platform
 import subprocess
 from pathlib import Path
 
+from libsast.exceptions import RulePackGenerationError
+
 # Semgrep CE redacts some JSON fields unless logged into Semgrep App.
 _REDACTED = 'requires login'
 
@@ -51,12 +53,54 @@ def batch_paths(base_command, paths, max_bytes=None):
     return batches
 
 
-def merge_semgrep_reports(reports):
-    """Merge Semgrep JSON reports from multiple invocations."""
+def _report_generation(report):
+    """Extract the rulepack generation recorded in one Semgrep report."""
+    if not isinstance(report, dict):
+        return None
+    generation = report.get('generation')
+    if generation is None:
+        generation = report.get('scan_generation')
+    if generation:
+        return str(generation)
+    rulepack = report.get('rulepack') or report.get('rulepacks')
+    if isinstance(rulepack, dict):
+        generation = (
+            rulepack.get('generation')
+            or rulepack.get('identity')
+            or rulepack.get('rulepack_id')
+            or rulepack.get('version'))
+    elif rulepack is not None:
+        generation = (
+            getattr(rulepack, 'generation', None)
+            or getattr(rulepack, 'identity', None))
+    if generation:
+        return str(generation)
+    return None
+
+
+def merge_semgrep_reports(reports, generation=None, rulepack=None):
+    """Merge Semgrep JSON reports from multiple invocations.
+
+    Reports may carry the rulepack generation that produced them.  Mixing
+    reports from different generations would make findings impossible to
+    attribute, so such a merge fails instead of publishing a hybrid report.
+    Reports without generation metadata keep the historical behaviour.
+    """
     merged = {'results': [], 'errors': []}
+    expected_generation = str(generation) if generation else None
     for report in reports:
         if not report:
             continue
+        report_generation = _report_generation(report)
+        if report_generation is not None:
+            if (
+                    expected_generation is not None
+                    and report_generation != expected_generation):
+                raise RulePackGenerationError(
+                    'Cannot merge Semgrep reports from different '
+                    f'rulepack generations: {expected_generation} and '
+                    f'{report_generation}')
+            expected_generation = report_generation
         merged['results'].extend(report.get('results') or [])
         errors = report.get('errors')
         if not errors:
@@ -65,6 +109,12 @@ def merge_semgrep_reports(reports):
             merged['errors'].extend(errors)
         else:
             merged['errors'].append(errors)
+    if expected_generation is not None:
+        merged['generation'] = expected_generation
+    if rulepack is not None:
+        merged['rulepack'] = (
+            rulepack.as_dict(include_rules=True)
+            if hasattr(rulepack, 'as_dict') else rulepack)
     return merged
 
 

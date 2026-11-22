@@ -6,6 +6,14 @@ from .core_matcher.pattern_matcher import PatternMatcher
 from .core_matcher.choice_matcher import ChoiceMatcher
 from .core_sgrep.semantic_sgrep import SemanticGrep
 from .core_treesitter.ts_matcher import TreeSitterMatcher
+from .rulepack import (
+    RulePack,
+    RulePackStore,
+    RuleSet,
+    default_store,
+    get_rulepack,
+    rulepack_from_rules,
+)
 from .scanner import Scanner
 
 
@@ -21,6 +29,12 @@ __all__ = [
     'PatternMatcher',
     'SemanticGrep',
     'TreeSitterMatcher',
+    'RulePack',
+    'RuleSet',
+    'RulePackStore',
+    'default_store',
+    'get_rulepack',
+    'rulepack_from_rules',
     '__title__',
     '__authors__',
     '__copyright__',

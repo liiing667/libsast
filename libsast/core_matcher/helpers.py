@@ -1,15 +1,17 @@
 # -*- coding: utf_8 -*-
 """Helper Functions."""
 import re
-from pathlib import Path
 
 from libsast.exceptions import (
-    InvalidRuleError,
     MissingRuleError,
     RuleDownloadError,
 )
-from libsast.common import read_yaml
-from libsast.standards import get_mapping
+from libsast.rulepack import (
+    RulePack,
+    RuleSet,
+    get_rulepack as _get_rulepack,
+    rulepack_from_rules,
+)
 
 import requests
 
@@ -33,34 +35,66 @@ def download_rule(url):
         raise RuleDownloadError(f'Failed to download from: {url}')
 
 
-def get_rules(rule_loc):  # noqa: R701
-    """Get pattern matcher rules."""
+def get_rulepack(rule_loc, **kwargs):
+    """Get an immutable snapshot of a rule location.
+
+    This is the admission point used by :class:`libsast.Scanner` and by the
+    individual matchers.  Keeping the historical :func:`get_rules` list API
+    means existing callers do not need to change.
+    """
+    return _get_rulepack(rule_loc, **kwargs)
+
+
+def get_semgrep_rulepack(rule_loc, **kwargs):
+    """Get a raw rulepack snapshot suitable for ``semgrep --config``."""
+    kwargs.setdefault('raw', True)
+    return _get_rulepack(rule_loc, **kwargs)
+
+
+def get_last_known_good_rulepack(rule_loc, raw=False):
+    """Return the last complete snapshot for a source, if one exists.
+
+    This is intentionally a read-only lookup.  Callers that need a fresh
+    candidate must use :func:`get_rulepack`; this accessor is useful for
+    auditing and recovery paths that must not trigger a download/read.
+    """
+    from libsast.rulepack import default_store, source_key
+
+    return default_store.get((source_key(rule_loc), bool(raw)))
+
+
+def get_rules(rule_loc, version=None, allow_stale=True):  # noqa: R701
+    """Get pattern matcher rules.
+
+    The returned object is a list for compatibility, but it also carries the
+    frozen :class:`RulePack` snapshot as ``rulepack``/``version``/
+    ``identity``/``generation`` attributes.  All matchers that receive the
+    same source therefore share one immutable generation.
+    """
     if not rule_loc:
         raise MissingRuleError('Rule location is missing.')
-    if rule_loc.startswith(('http://', 'https://')):
-        pat = download_rule(rule_loc)
-        if not pat:
-            return
-        rules = read_yaml(pat, True)
-        if not rules:
-            return
-        return get_mapping(rules)
-    rule = Path(rule_loc)
-    if rule.is_file() and rule.exists():
-        rules = read_yaml(rule)
-        if not rules:
-            return
-        return get_mapping(rules)
-    elif rule.is_dir() and rule.exists():
-        patterns = []
-        for yfile in rule.glob('**/*.yaml'):
-            rules = read_yaml(yfile)
-            if rules:
-                rules = get_mapping(rules)
-                patterns.extend(rules)
-        return patterns
-    else:
-        raise InvalidRuleError('This path is invalid')
+    if isinstance(rule_loc, RuleSet):
+        return rule_loc
+    if isinstance(rule_loc, RulePack):
+        return rule_loc.rule_set()
+    if isinstance(rule_loc, (list, tuple)):
+        pack = rulepack_from_rules(
+            rule_loc, version=version)
+        return pack.rule_set()
+    if isinstance(rule_loc, dict):
+        pack = _get_rulepack(
+            rule_loc, version=version, allow_stale=allow_stale)
+        return pack.rule_set()
+
+    pack = _get_rulepack(
+        rule_loc, version=version, allow_stale=allow_stale)
+    if pack is None:
+        return None
+    if not pack.rules and not pack.raw and pack.source_kind in (
+            'file', 'url'):
+        # Historical behaviour: an empty single rule file yielded None.
+        return None
+    return RuleSet(pack.rules, pack)
 
 
 def comment_replacer(matches, data):
